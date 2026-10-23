@@ -67,14 +67,6 @@ clip2table doctor       # 自检：剪贴板 / 卡目录 / 浏览器调试端口
 
 零必需依赖，Python 3.11+，Windows 10/11。
 
-> PyPI 上的首次上传还没做（要先配 trusted publisher，见
-> [docs/publishing.md](docs/publishing.md)）。在那之前 `pip install clip2table`
-> 会 404，请从 [Releases](https://github.com/yjq123-zyh/clip2table/releases) 下 wheel 装：
->
-> ```bash
-> pip install https://github.com/yjq123-zyh/clip2table/releases/download/v0.1.0/clip2table-0.1.0-py3-none-any.whl
-> ```
-
 要给这个项目改代码，从源码装：
 
 ```bash
