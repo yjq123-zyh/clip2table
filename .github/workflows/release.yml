@@ -1,41 +1,81 @@
 name: release
 
+# 发版只有两个入口：手动点一次，或者推一个 v* 标签。
+# 不监听 main 上的路径变更——那意味着「改一行 workflow 文件 = 发一次版」，
+# 是个迟早会误触的开关。v0.1.0 的首发是那次路径触发的，这件事已经做完了。
+
 on:
   workflow_dispatch:
   push:
-    branches: [main]
-    paths:
-      - '.github/workflows/release.yml'
+    tags:
+      - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: clip2table-release
   cancel-in-progress: false
 
 jobs:
-  publish:
-    # Bootstrap the first release once; future releases are started manually.
-    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'Publish clip2table v0.1.0 release'
-    runs-on: windows-latest
+  # 先把版本号、测试、构建三件事在同一个 job 里做完，产物交给后面两个 job。
+  # 顺序是有意的：任何一步不过，都不该有东西被推到 PyPI 或 GitHub Release。
+  build:
+    runs-on: windows-latest # 通道 C 调 Win32 API，单测只能在 Windows 上跑
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Read version and release notes
+      - name: 版本号与标签必须一致
         id: version
         shell: pwsh
+        env:
+          # 走环境变量而不是把 ${{ }} 拼进脚本正文：标签名是外部输入，
+          # 直接插进 shell 脚本就是一条注入路径。
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"
+          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # 用 PowerShell 自己的正则读 __init__.py，不嵌一层 python -c：
+          # 两层引号套在一起时，\" 在 PowerShell 里不是转义符，字符串会提前截断。
+          $initText = Get-Content -LiteralPath 'src/clip2table/__init__.py' -Raw -Encoding utf8
+          $m = [regex]::Match($initText, '__version__\s*=\s*"([^"]+)"')
+          if (-not $m.Success) {
+            Write-Host "::error::src/clip2table/__init__.py 里找不到 __version__"
+            exit 1
+          }
+          $init = $m.Groups[1].Value
+          if ($version -ne $init) {
+            Write-Host "::error::pyproject.toml 是 $version，__init__.py 是 $init——两个版本号必须一致"
+            exit 1
+          }
           $tag = "v$version"
-          if (-not (Test-Path "docs/releases/$tag.md")) { throw "Missing release notes for $tag" }
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          if (-not (Test-Path "docs/releases/$tag.md")) {
+            Write-Host "::error::缺少发版说明 docs/releases/$tag.md"
+            exit 1
+          }
+          if ($env:EVENT_NAME -eq 'push') {
+            $ref = $env:REF_NAME
+            if ($ref -ne $tag) {
+              Write-Host "::error::推的是标签 $ref，但代码里的版本是 $tag——标签和版本号对不上就不能发"
+              exit 1
+            }
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Build wheel and source distribution
+      # 标签可能打在任何一个提交上，而 tests.yml 只跑 main 的推送。
+      # 所以这里自己跑一遍，不让「没测过的提交」变成已发布的版本。
+      - name: 单元测试
+        run: python -m unittest discover -s tests -t .
+
+      - name: 构建 wheel 与 sdist
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check build
@@ -43,7 +83,70 @@ jobs:
           python -m build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Create checksums
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          # 只放能上 PyPI 的两种文件。SHA256SUMS.txt 不在这里生成：
+          # pypa/gh-action-pypi-publish 会把 packages-dir 里的陌生文件当错误，
+          # 而校验和对上传 PyPI 没有意义（PyPI 自己记摘要），它是给下载
+          # GitHub Release 的人用的。
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  # PyPI 走 Trusted Publishing（OIDC），不存任何 API token。
+  # 前提是在 https://pypi.org/manage/account/publishing/ 给本项目配一次
+  # pending publisher：项目名 clip2table，另四个字段必须与此处逐字一致：
+  #   Owner = yjq123-zyh, Repository = clip2table,
+  #   Workflow name = release.yml, Environment = pypi
+  # 改名要两边同时改，否则这一步会 403 invalid-publisher。
+  # 步骤见 docs/publishing.md。
+  publish-pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/clip2table
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: 取回产物
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: 推到 PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # 不写 skip-existing：同一版本传两次是错误，不该静默通过。
+          # PyPI 会明确报「File already exists」，那就是「你忘了升版本号」。
+          print-hash: true
+
+  github-release:
+    # 故意不依赖 publish-pypi。两个发布目标互不牵连：
+    # PyPI 那步因为还没配好 trusted publisher 而红，不该连带让 GitHub Release 也发不出来
+    # ——那等于「一个渠道没通，另一个本来能通的也跟着停了」。
+    # 反过来也成立：GitHub Release 建失败时，直接「重跑失败的 job」即可，
+    # 不会再去碰 PyPI（那个版本已经传上去，第二次必然报 File already exists）。
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取回产物
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: 生成校验和
         shell: pwsh
         run: |
           $lines = Get-ChildItem dist -File | Sort-Object Name | ForEach-Object {
@@ -52,14 +155,24 @@ jobs:
           }
           $lines | Set-Content -LiteralPath dist/SHA256SUMS.txt -Encoding utf8
 
-      - name: Publish GitHub Release
+      # 幂等：标签已存在时 create 会 422，改为覆盖资产。
+      # v0.1.0 的 Release 已经建过，所以第一次跑这里必然走上传分支。
+      - name: 建或更新 GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
         run: |
           $tag = $env:RELEASE_TAG
+          if (-not $tag) { throw "拿不到版本号" }
           $assets = @(Get-ChildItem dist -File | ForEach-Object { $_.FullName })
-          gh release create $tag @assets --repo $env:GH_REPO --target $env:GITHUB_SHA --title "clip2table $tag" --notes-file "docs/releases/$tag.md" --latest
+          gh release view $tag --repo $env:GH_REPO *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag 已存在，覆盖资产（不重复写说明）"
+            gh release upload $tag @assets --clobber --repo $env:GH_REPO
+          } else {
+            gh release create $tag @assets --repo $env:GH_REPO --target $env:GITHUB_SHA `
+              --title "clip2table $tag" --notes-file "docs/releases/$tag.md" --latest
+          }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

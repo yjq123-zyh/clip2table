@@ -6,6 +6,8 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+# 装 wheel 用的干净副本（本地和 CI 都用这个名字）
+.venv-pkg/
 
 # ---- 测试与覆盖率 ----
 .pytest_cache/
@@ -22,6 +24,9 @@ out/
 # _dev/ 只发布「不装包也能跑」的启动器，其余是本地验收夹具与脚本
 _dev/*
 !_dev/c2t.py
+# 例外：release.yml 是唯一一份「写错了本地不红、只在推标签那一刻红」的文件，
+# 它的检查脚本得留在仓库里，否则等于没人检查。
+!_dev/check_release_workflow.py
 
 # v1 评审原件（70KB）。被否掉的方案已经提炼进 docs/design-notes.md，
 # 原件留着只会让读者以为它还在生效。

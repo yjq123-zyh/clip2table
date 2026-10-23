@@ -27,8 +27,10 @@
 ## 2. 装
 
 ```bash
-pip install -e .
+pip install clip2table
 ```
+
+要在仓库里改代码时用 `pip install -e .`。
 
 零必需依赖，只要 Python 3.11+（`tomllib` 在标准库里）。Windows 10/11 是主要目标平台，
 因为桌面通道要用 Win32 剪贴板与 `SendInput`。

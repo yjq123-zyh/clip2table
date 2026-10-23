@@ -91,3 +91,21 @@ jobs:
           }
           Write-Host "selftest 正确退出 $LASTEXITCODE"
           exit 0
+
+  # release.yml 是唯一一份「改错了本地不会红、只在推标签那一刻才红」的文件，
+  # 而推标签那一刻已经来不及了。所以每次推送都把它抠出来真跑一遍。
+  # pyyaml 只属于这个检查脚本，产品本身仍然是零依赖。
+  workflow:
+    name: 发版工作流检查
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 检查 release.yml
+        run: |
+          python -m pip install --quiet pyyaml
+          python _dev/check_release_workflow.py

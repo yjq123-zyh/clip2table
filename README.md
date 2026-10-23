@@ -61,16 +61,21 @@ file ｜ FILE ｜ S1 ｜ 3 行 × 5 列 ｜ 未识别 0 行
 ## 装
 
 ```bash
-git clone https://github.com/yjq123-zyh/clip2table.git
-cd clip2table
-pip install .
+pip install clip2table
 clip2table doctor       # 自检：剪贴板 / 卡目录 / 浏览器调试端口
 ```
 
 零必需依赖，Python 3.11+，Windows 10/11。
 
-不想装包：`python _dev/c2t.py <子命令>`，效果一样（它只是把 `src/` 挂上 `sys.path`）。
-开发时用 `pip install -e .`。
+要给这个项目改代码，从源码装：
+
+```bash
+git clone https://github.com/yjq123-zyh/clip2table.git
+cd clip2table
+pip install -e .
+```
+
+完全不想装包也可以：`python _dev/c2t.py <子命令>`，效果一样（它只是把 `src/` 挂上 `sys.path`）。
 
 ## 三条命令
 
@@ -140,6 +145,7 @@ clip2table harvest -p mysite.toml --max-pages 20 --yes -f csv -f xlsx --dir out
 | 代码怎么组织、数据怎么流、状态存在哪 | **[docs/architecture.md](docs/architecture.md)** |
 | 为什么这么设计、哪些方案被否掉了 | **[docs/design-notes.md](docs/design-notes.md)** |
 | 十六项整改各自的验收证据 | [docs/verification.md](docs/verification.md) |
+| 怎么发版、PyPI 怎么配 | [docs/publishing.md](docs/publishing.md) |
 | 给 agent 用的决策循环 | [SKILL.md](SKILL.md) |
 | 改了什么 | [CHANGELOG.md](CHANGELOG.md) |
 | 权利归属、能拿去做什么、免责 | [NOTICE.md](NOTICE.md) |
