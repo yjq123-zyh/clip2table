@@ -1,0 +1,65 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: clip2table-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Bootstrap the first release once; future releases are started manually.
+    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'Publish clip2table v0.1.0 release'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Read version and release notes
+        id: version
+        shell: pwsh
+        run: |
+          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tag = "v$version"
+          if (-not (Test-Path "docs/releases/$tag.md")) { throw "Missing release notes for $tag" }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build wheel and source distribution
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Create checksums
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem dist -File | Sort-Object Name | ForEach-Object {
+            $digest = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$digest  $($_.Name)"
+          }
+          $lines | Set-Content -LiteralPath dist/SHA256SUMS.txt -Encoding utf8
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          $assets = @(Get-ChildItem dist -File | ForEach-Object { $_.FullName })
+          gh release create $tag @assets --repo $env:GH_REPO --target $env:GITHUB_SHA --title "clip2table $tag" --notes-file "docs/releases/$tag.md" --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

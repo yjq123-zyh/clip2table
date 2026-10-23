@@ -90,3 +90,4 @@ jobs:
             exit 1
           }
           Write-Host "selftest 正确退出 $LASTEXITCODE"
+          exit 0
