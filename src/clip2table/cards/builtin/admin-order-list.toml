@@ -1,0 +1,55 @@
+schema  = 1
+name    = "admin-order-list"
+channel = "browser"
+
+# 后台列表页：表格是事实，列边界就是字段边界。电商/招聘/财务后台结构一致。
+#
+# 为什么 mode = "lines"：后台表格复制出来时，行已经是分开的（HTML 的 <tr>
+# 变成一行 tab 分隔文本，Excel 区域粘贴也是每行一条）。再按锚点分组不是规则，
+# 是 bug——`single` 曾把 11 行表格粘成 1 条记录，第一条字段是表头文字，
+# 还报了两个字段 100% 填充。
+
+samples = "samples/admin-order-list"
+
+[fetch]
+url   = "https://example.com/admin/orders"
+ready = "load"
+scroll = { until = "stable", max = 40, pause_ms = 600 }
+
+[segment]
+mode  = "lines"
+# 后台表格复制出来时第一行通常是列名（「订单号 / 下单时间 / 金额 …」）。
+# 不跳过它就会多出一条「order_no=订单号、amount=空」的记录，amount 的
+# 填充率也因此被拉低——一份干净的表看起来像规则失效。
+skip_header = true
+
+[fields.order_no]
+kind = "cell"
+col  = 0
+
+[fields.created]
+kind = "cell"
+col  = 1
+
+[fields.amount]
+kind = "cell"
+col  = 2
+type = "float"
+
+[fields.status]
+kind = "cell"
+col  = 3
+
+[fields.note]
+kind = "cell"
+col  = 4
+
+[dedupe]
+key          = ["order_no"]
+on_collision = "report_only"
+
+[paging]
+style     = "click"
+next      = "a.next"
+max_pages = 50
+pause_ms  = 1200

@@ -1,0 +1,51 @@
+schema  = 1
+name    = "notice-list"
+channel = "browser"
+
+# 列表页：一屏多条，每条是「标题 / 日期 / 正文」三行一段，还带一个可选的规格行。
+#
+# 这是最通用的列表形状：采购公告、招标信息、政策文件、活动报名、文章列表
+# 都是它。字段名按你的业务改，规则不用动。
+#
+# 分页交给 [paging]：点「下一页」链接，连续 2 页没有新增就自动停。
+
+samples = "samples/notice-list"
+
+[harvest]
+select_all  = true
+timeout_ms  = 5000
+
+[segment]
+mode        = "anchor"
+anchor      = '^(?!\s).{1,60}$'
+# 第二行必须是**裸日期**，不能是「以日期开头的正文」——否则正文里提到
+# 2026-03-12 的那一行会被当成新记录的开头，一条记录被切成两条。
+anchor_next = '^\d{4}\s*[-/.年]\s*\d{1,2}\s*(?:[-/.月]\s*\d{1,2}\s*[日号]?)?\s*$'
+min_lines   = 3
+
+[fields.title]
+kind  = "line"
+index = 0
+
+[fields.date]
+kind    = "line"
+index   = 1
+type    = "date"
+
+[fields.body]
+kind  = "line"
+index = 2
+
+[fields.spec]
+kind    = "search"
+pattern = '^规格[:：]\s*(?P<v>.+)$'
+
+[dedupe]
+key          = ["title"]
+on_collision = "report_only"
+
+[paging]
+style     = "click"
+next      = "a.next"
+max_pages = 5
+pause_ms  = 1200

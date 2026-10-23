@@ -1,0 +1,54 @@
+schema  = 1
+name    = "job-list"
+channel = "desktop"
+
+# 招聘列表：一条五段——职位 / 公司 / 地点经验 / 薪资 / 发布日期，日期在**最后**。
+#
+# 这张卡的日期锚点是反向的：记录以「日期行」结束，下一条从日期行的下一行开始。
+# 用 notice-list 那种「第二行是日期」的卡去套它，会把薪资行当成标题——所以
+# 这里给的是分开的一张卡，而不是把两张卡揉成一个万能正则。
+#
+# 采集方式：浏览器里 F12 → Elements 之外最省事的形态是「全选复制」，
+# 或者用 desktop 通道对一个只显示招聘列表的窗口按 Ctrl+A。
+
+samples = "samples/job-list"
+
+[harvest]
+select_all = true
+timeout_ms = 5000
+
+[segment]
+# 空行分段。为什么不用 anchor：锚点机制只能把「命中行」当作记录的**起点**，
+# 而这张卡的日期在末尾——写成 anchor 会让每一行都成为起点，然后 min_lines
+# 把单行记录全部滤掉，结果是 0 行、全部未识别（试过，就是这样）。
+# 招聘站复制出来的块之间通常有空行，所以用 blank；没有空行就先用 infer。
+mode        = "blank"
+
+[fields.title]
+kind  = "line"
+index = 0
+
+[fields.company]
+kind  = "line"
+index = 1
+
+[fields.location]
+kind  = "line"
+index = 2
+
+[fields.salary]
+kind  = "line"
+index = 3
+
+[fields.date]
+kind    = "line"
+index   = -1
+type    = "date"
+pattern = '(?P<v>\d{4}[-/.]\d{1,2}[-/.]\d{1,2})'
+
+[dedupe]
+key          = ["title", "company"]
+on_collision = "report_only"
+
+[paging]
+style = "none"

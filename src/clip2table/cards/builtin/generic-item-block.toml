@@ -1,0 +1,57 @@
+schema  = 1
+name    = "generic-item-block"
+channel = "desktop"
+
+# 通用「条目块」：一条短标题行，紧跟一行日期，然后是正文/规格。
+# 电商列表、政务名录、文献列表、房源条目都是这个形状，改的只是字段名。
+#
+# 它要求的形状很具体：日期必须是记录里的**第二行**。
+# 招聘列表那种「标题/公司/地点/薪资/日期」日期在末尾的版式**不适用**本卡——
+# 硬套会把薪资行当成标题。那种版式直接用 `clip2table infer`，S1 会正确切出
+# 五列（已用 fixtures/sample-hr.txt 验证）。用错卡不是数据问题，是选错工具；
+# 报告里的「未识别 N 行」就是它给你的信号。
+
+samples = "samples/generic-item-block"
+
+[segment]
+mode        = "anchor"
+anchor      = '^(?!\s).{1,40}$'
+# The date line must be a BARE date (optionally with a time) and nothing else.
+# A loose date prefix ('^\d{4}-\d{1,2}') also matches a body line that merely
+# begins with a date - "2026-03-12 补记：扶手略窄" - and then that body line
+# becomes a record start, splitting one record into two.
+anchor_next = '^\d{4}\s*[-/.年]\s*\d{1,2}\s*(?:[-/.月]\s*\d{1,2}\s*[日号]?)?(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?\s*$'
+min_lines   = 2
+
+[fields.title]
+kind  = "line"
+index = 0
+
+[fields.date]
+kind    = "search"
+pattern = '(?P<v>\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日)'
+scope   = "head"
+window  = 2
+type    = "date"
+
+[fields.body]
+kind  = "span"
+from  = "after:date"
+# The `?` makes the stop marker optional: cut before 规格 when the record has
+# one, run to the end of the record when it does not. Strict (no `?`) is the
+# default because a vanished marker usually means the page changed under the
+# card -- and a strict bound that cannot be found returns empty, not the whole
+# record. This card serves both shapes, so it has to declare that explicitly.
+to    = "before?:^规格[:：]"
+type  = "text"
+
+[fields.spec]
+kind    = "search"
+pattern = '^规格[:：]\s*(?P<v>.+)$'
+
+[dedupe]
+key          = ["title", "date", "body"]
+on_collision = "report_only"
+
+[paging]
+style = "none"

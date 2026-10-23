@@ -1,0 +1,47 @@
+schema  = 1
+name    = "numbered-list"
+channel = "desktop"
+
+# 编号清单：一行一条，「1. 事项名 —— 进度/时间」。
+#
+# 这是台账、任务清单、问题列表、验收项清单最常见的形状——每条只占一行，
+# 和上面那些「多行一段」的卡完全不同。这里靠行首编号切分，不靠空行也不靠
+# 日期，因为这类清单通常把编号当唯一的分界信号。
+
+samples = "samples/numbered-list"
+
+[target]
+# 从任何窗口里复制都行：改成你那个窗口标题里的一段文字。
+# 比如 "工作台账 - Notepad"、"任务列表 - Excel"。
+title   = "工作台账"
+restore = true
+
+[harvest]
+select_all = true
+timeout_ms = 5000
+
+[segment]
+mode   = "anchor"
+# 行首 1. / 2. / 1、/ (1) 都算一条新记录。行内的「——」不当分界：
+# 它就是这条记录里的一个分隔符，切成两条反而会把一条记录拆散。
+anchor = '^\s*(?:\d{1,3}[.、)）]|[（(]\d{1,3}[)）])'
+min_lines = 1
+
+[fields.no]
+kind    = "search"
+pattern = '^\s*(?P<v>\d{1,3})'
+
+[fields.item]
+kind    = "search"
+pattern = '^\s*\d{1,3}[.、)）]\s*(?P<v>.+?)\s*(?:——|--|—)\s*'
+
+[fields.progress]
+kind    = "search"
+pattern = '(?:——|--|—)\s*(?P<v>.+)$'
+
+[dedupe]
+key          = ["no"]
+on_collision = "report_only"
+
+[paging]
+style = "none"

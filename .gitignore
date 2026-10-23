@@ -1,0 +1,35 @@
+# ---- 构建产物 ----
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- 测试与覆盖率 ----
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ---- 本地实验产物，不进仓库 ----
+# 探针脚本与浏览器/站点夹具：都是为某一条验收临时搭的，留着只会让人以为
+# 它们是产品的一部分。验收结论已经提炼进 docs/verification.md。
+_probe/
+evidence/
+out/
+
+# _dev/ 只发布「不装包也能跑」的启动器，其余是本地验收夹具与脚本
+_dev/*
+!_dev/c2t.py
+
+# v1 评审原件（70KB）。被否掉的方案已经提炼进 docs/design-notes.md，
+# 原件留着只会让读者以为它还在生效。
+docs/history/clip2table-design-review-v1.md
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

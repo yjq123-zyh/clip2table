@@ -1,0 +1,22 @@
+# sdist 里要有足够跑测试的东西，否则「下载源码包」这条路是死的。
+# 之前只有 src/ 和 tests/ 进了 sdist，fixtures/ 没进——单测一跑就红在找不到夹具，
+# 下载 sdist 的人会以为代码坏了。wheel 是给用户的，sdist 是给改代码的人的，
+# 两者要的内容不一样，得分开说。
+
+include LICENSE
+include NOTICE.md
+include README.md
+include SKILL.md
+include CHANGELOG.md
+include pyproject.toml
+
+# 单测直接读 fixtures/，缺了它 472 项里有一批跑不起来
+recursive-include fixtures *
+recursive-include tests *
+
+# selftest 要拿这几份文档跟真实参数表对账；装好的 wheel 没有它们（那时它会报错），
+# sdist 里有，所以从 sdist 跑 selftest 是绿的、从 wheel 跑是非 0 的，两者都对
+recursive-include docs *.md
+
+# 不装包也能跑的子命令启动器，CI 和文档都用它
+include _dev/c2t.py
