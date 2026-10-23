@@ -32,6 +32,10 @@ pip install clip2table
 
 要在仓库里改代码时用 `pip install -e .`。
 
+> PyPI 首发还没上传。在那之前 `pip install clip2table` 会 404，改用 Release 里的 wheel：
+> `pip install <Releases 页里 clip2table-0.1.0-py3-none-any.whl 的下载链接>`。
+> 上传流程见 [publishing.md](publishing.md)。
+
 零必需依赖，只要 Python 3.11+（`tomllib` 在标准库里）。Windows 10/11 是主要目标平台，
 因为桌面通道要用 Win32 剪贴板与 `SendInput`。
 
