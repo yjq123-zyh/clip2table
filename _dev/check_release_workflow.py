@@ -27,6 +27,13 @@ WF = ROOT / ".github" / "workflows" / "release.yml"
 
 
 def main() -> int:
+    # Windows 的 CI runner 用 cp1252 当控制台编码，中文一 print 就
+    # UnicodeEncodeError——那是「这台机器读不了中文」，不是「检查没通过」。
+    # 两者的退出码都是 1，所以在 CI 上根本分不清。这里先把输出强制成 UTF-8。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     doc = yaml.safe_load(WF.read_text(encoding="utf-8"))
     print("YAML 解析通过，顶层键:", list(doc))
 
