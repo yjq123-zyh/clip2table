@@ -59,7 +59,7 @@
 
 | 文件 | 职责 | 不做什么 |
 |---|---|---|
-| `cli.py`（1027 行） | 参数定义、子命令分发、报告打印 | 不解析、不写数据集 |
+| `cli.py`（约 1100 行） | 参数定义、子命令分发、报告打印 | 不解析、不写数据集 |
 | `__main__.py` | `python -m clip2table` | — |
 | `capabilities.py` | 一张能力表，校验 / 分发 / 帮助文案共用 | 不做取数 |
 
@@ -77,7 +77,7 @@
 | `channels/keyboard.py` | Win32 按键：`SetForegroundWindow`、`SendInput`、焦点记录与归还、窗口身份校验 |
 | `channels/clipboard.py` | Win32 剪贴板读写（TEXT / CF_HTML / TSV），序列号变化检测 |
 | `channels/cfhtml.py` | 把 CF_HTML 片段还原成 HTML |
-| `harvest.py`（894 行） | 一轮采集的编排：聚焦 → 选全 → 复制 → 读剪贴板 → 解析 → 翻页 → 停 |
+| `harvest.py`（约 980 行） | 一轮采集的编排：聚焦 → 选全 → 复制 → 读剪贴板 → 解析 → 翻页 → 停 |
 
 `harvest.py` 是唯一同时知道"怎么按"和"按完要等什么"的地方。它不决定数据怎么切。
 
@@ -104,7 +104,7 @@
 | 文件 | 职责 |
 |---|---|
 | `models.py` | `Captured` / `Row` / `ParseResult` / `FieldTrace` / `Conflict` |
-| `dataset.py`（931 行） | 页提交、去重、冲突分类、状态、卡快照绑定 |
+| `dataset.py`（约 1360 行） | 页提交、去重、冲突分类、状态、卡快照绑定 |
 | `flow.py` | 提交边界的唯一入口（`Committer`） |
 | `report.py` | 报告文本 / JSON 的渲染 |
 
