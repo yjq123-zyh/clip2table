@@ -28,10 +28,23 @@ def parse_capture(cap: Captured, card: Card | None = None) -> tuple[ParseResult,
         anchor_next=card.anchor_next,
         blank_separated=(card.segment_mode == "blank"),
     )
-    if card.segment_mode == "single":
+    # The two rebuilt modes below replace `seg.records` wholesale, so the starts
+    # `segment()` filled no longer match them. They are filled again from here.
+    _where = [i for i, ln in enumerate(lines) if ln.strip()]
+    if card.segment_mode == "periodic":
+        from .marks import reslice
+        if len(_where) <= card.segment_offset:
+            # An empty/short later page leaves all source lines available for review.
+            seg.records, seg.record_starts, seg.record_lines = [], [], []
+            seg.unparsed = [lines[i] for i in _where]
+        else:
+            seg = reslice(lines, card.segment_period, card.segment_offset, card.segment_count)
+    elif card.segment_mode == "single":
         filled = [ln for ln in lines if ln.strip()]
         seg.records = [filled] if filled else []
         seg.total_lines = len(filled)
+        seg.record_starts = _where[:1]
+        seg.record_lines = [list(_where)] if filled else []
         seg.unparsed = []
         seg.method = "single"
     elif card.segment_mode == "lines":
@@ -41,30 +54,69 @@ def parse_capture(cap: Captured, card: Card | None = None) -> tuple[ParseResult,
         # a whole pasted table into one record whose first cell was the header
         # row -- 11 lines became 1 row with 100% fill on the first two fields,
         # which reads like a clean parse.
-        filled = [ln for ln in lines if ln.strip()]
+        record_at = list(_where)
+        if cap.kind == "html" and any(f.kind == "cell" for f in card.fields):
+            from .pipeline.htmltable import html_line_blocks
+            blocks = html_line_blocks(cap.payload or "")
+            if any(kind == "row" for kind, _ in blocks):
+                record_at = []
+                pos = 0
+                for kind, text in blocks:
+                    block_lines = to_lines(normalize_text(text))
+                    if kind == "row":
+                        record_at.extend(pos + i for i, ln in enumerate(block_lines) if ln.strip())
+                    pos += len(block_lines)
+        record_set = set(record_at)
+        others = [lines[i] for i in _where if i not in record_set]
+        filled = [lines[i] for i in record_at]
         head = []
         if card.skip_header and filled:
             head = [filled[0]]
             filled = filled[1:]
         seg.records = [[ln] for ln in filled]
-        seg.total_lines = len(filled) + len(head)
+        seg.total_lines = len(_where)
+        # `segment()` above never ran for this mode, so the starts it would have
+        # filled are filled here. Without them the preview says a value came
+        # from "记录内第 1 行" for every row, which reads as if the whole table
+        # were one record.
+        seg.record_starts = record_at[len(head):]
+        # One single-index list per one-line record. `lines` mode is the one
+        # that cannot drift (each record is one line), but filling it keeps
+        # `raw_at` meaning the same thing in every mode.
+        seg.record_lines = [[i] for i in record_at[len(head):]]
         # The header row is consumed (it is the column names), not unparsed:
         # putting it in unparsed would report a phantom "未识别 1 行" for every
         # clean table.
         seg.extra_consumed = len(head)
-        seg.unparsed = []
+        seg.unparsed = others
         seg.method = "lines"
         seg.notes.append(
             "首行当表头，未计入记录" if head else "一行一记录（没有跳过表头）")
 
     if card.min_lines > 1:
         keep: list[list[str]] = []
-        for rec in seg.records:
+        kept_at: list[int] = []
+        kept_lines: list[list[int]] = []
+        for i, rec in enumerate(seg.records):
             if len(rec) >= card.min_lines:
                 keep.append(rec)
+                if i < len(seg.record_starts):
+                    kept_at.append(seg.record_starts[i])
+                if i < len(seg.record_lines):
+                    kept_lines.append(seg.record_lines[i])
             else:
                 seg.unparsed.extend(rec)
         seg.records = keep
+        if len(kept_at) == len(keep):
+            seg.record_starts = kept_at
+        else:
+            # The dropped records broke the one-to-one match; a start list that
+            # no longer lines up would point at the wrong rows.
+            seg.record_starts = []
+        if len(kept_lines) == len(keep):
+            seg.record_lines = kept_lines
+        else:
+            seg.record_lines = []
 
     res = assemble(
         seg, card.fields,

@@ -129,6 +129,26 @@ if __name__ == "__main__":
 class TestHarvestPagesRestoresFirst(unittest.TestCase):
     """The loop must move the tab BEFORE it copies anything."""
 
+    def test_url_paging_starts_at_one_and_navigates_each_page_on_reuse(self):
+        from unittest.mock import patch, Mock
+        import clip2table.harvest as hv
+        from clip2table.models import Captured
+        from clip2table.pipeline.extract import FieldSpec
+        card = _card(paging_url_template="https://x/list?p={page}", pause_ms=0,
+                     segment_mode="lines", fields=[FieldSpec(name="id", kind="line", index=0)])
+        client = FakeClient()
+        client.close = Mock()
+        client.nav.append("https://x/list?p=9")
+        def capture(card, page, **kwargs):
+            return hv.Round(Captured(kind="text", payload=f"order-{page}", channel="browser"), page=page)
+        with patch.object(hv.cdp_mod, "connect", return_value=(client, {"url": "https://x/list?p=9"})), \
+             patch.object(hv, "harvest_browser", side_effect=capture):
+            for _ in range(2):
+                result = hv.harvest_pages(card, max_pages=2)
+                self.assertEqual([r.result.rows[0].values["id"] for r in result.rounds], ["order-1", "order-2"])
+        self.assertEqual(client.nav[1:], ["https://x/list?p=1", "https://x/list?p=2"] * 2)
+        self.assertEqual(client.close.call_count, 2)
+
     def test_restore_runs_before_the_first_capture(self):
         import clip2table.harvest as hv
         from clip2table.models import Captured, ParseResult, Row

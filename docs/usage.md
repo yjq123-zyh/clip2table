@@ -1,6 +1,6 @@
 # 使用说明
 
-本文介绍安装、采集、结构识别、卡片配置和导出方法。
+本文介绍安装、采集、结构识别、卡片与任务配置、导出方法。
 模块职责见 `architecture.md`，设计取舍见 `design-notes.md`。
 
 ---
@@ -56,7 +56,7 @@ clip2table doctor
 |---|---|---|---|
 | `http` | HTTP 直连 | 服务端就渲染好了 | 无 |
 | `browser` | E1：CDP 发真 Ctrl+A / Ctrl+C | 要登录、要 JS、有反爬 | 窗口只是被盖住时不动你的前台；浏览器被最小化时要短暂借前台，采完归还 |
-| `desktop` | E2：Win32 `SendInput` | Windows 客户端、Excel、记事本 | 需要前台焦点（见 §9 安全边界） |
+| `desktop` | E2：Win32 `SendInput` | Windows 客户端、Excel、记事本 | 需要前台焦点（见 §10 安全边界） |
 
 不指定时自动降级：先试直连（2 秒超时），被挡就驱动已登录的浏览器，还不行就驱动前台窗口。
 `--channel` 可以钉死某一条，钉死时不降级。
@@ -114,14 +114,66 @@ clip2table harvest -p cards/mysite.toml --max-pages 1 --dry-run --show 3
 
 `--dry-run` 预览结果，`--show 3` 打印前三条记录。确认记录边界和字段后，可增加采集页数。
 
-### 第三步：放量
+### 更快：交给任务向导
+
+手写卡不算难，但第一次总要试几遍。`task new` 把这一步变成问答：它先打印推断出来的表，
+再逐条问字段名、去重主键、数据来源，最后写出一个**以后能直接再跑**的任务卡。
 
 ```bash
-clip2table harvest -p cards/mysite.toml --max-pages 20 --yes \
-  -f csv -f xlsx --dir out
+clip2table task new --text-file page.txt          # 交互
+clip2table task new --text-file page.txt --yes    # 全部用推断值（agent 用这条）
 ```
 
-多页采集会要求交互确认，`--yes` 可直接开始执行。
+向导收集采集通道、目标地址或窗口、翻页方式和页数。自动填写时可以显式传入：
+
+```powershell
+clip2table task new --text-file page.txt --channel browser --source 'https://your-site.example/orders' --next 'a.next' --max-pages 2 --yes --out cards/mysite.toml
+clip2table task new --text-file page.txt --channel http --source 'https://your-site.example/orders?page={page}' --max-pages 2 --yes --out cards/http.toml
+clip2table task new --text-file page.txt --channel desktop --source '订单管理' --next pagedown --max-pages 2 --yes --out cards/desktop.toml
+```
+
+`--source` 保存再次采集的目标；`--url` 用于立即读取样本。浏览器按钮翻页从当前页面开始，
+重跑前切回第一页；页码 URL 会自动定位并逐页导航。`--yes` 配合文件样本且未提供来源时，
+生成用于文件导入的规则卡，运行时继续提供 `--text-file` 或 `--html-file`。
+复合去重键用逗号分隔，输入 `-` 关闭去重。转换已有卡时保留冲突策略及身份、可变字段定义。
+
+### 第三步：预览，确认每个字段来自原文哪一行
+
+```bash
+clip2table task check cards/mysite.toml --text-file page.txt --lines 20
+```
+
+三样东西一起打印：表格、每个字段的值来自原文第几行、原文每一行归哪条记录（`·` 表示
+没人认领）。字段取错行时，看这里最快。
+
+### 第四步：改一条规则，看整批效果，再保存
+
+```bash
+clip2table task fix cards/mysite.toml --field 金额 \
+  --kind search --pattern '¥\s*(?P<v>[0-9][0-9,]*\.[0-9]{2})' \
+  --text-file page.txt
+```
+
+不带 `--write` 只打印「这条规则会让哪些值变成什么」，卡不动。确认对了再：
+
+```bash
+clip2table task fix ... --write
+```
+
+`--write` 只替换那一个 `[fields.X]` 段，文件里其他字节（注释、排版）不动。
+
+### 第五步：放量
+
+```bash
+clip2table task run -p cards/mysite.toml -d out/mytask --max-pages 20 --yes
+clip2table export -d out/mytask -f csv -f xlsx --dir out
+```
+
+多页采集会要求交互确认，`--yes` 可直接开始执行。`-d` 让结果累积进一个目录，同一页
+重复提交会被挡住并给出非零退出码。
+
+`-d` 的导出要单独跑 `export -d`：采集与导出分开，是为了采集中断时已经提交的页仍然能
+导出，而不是卡在最后一页才落盘。
 
 ---
 
@@ -299,7 +351,116 @@ mutable  = ["状态", "金额"]
 
 ---
 
-## 9. 安全边界（desktop 通道）
+## 9. 任务：把一次成功变成可以重复跑的东西
+
+卡描述「怎么切」，任务描述「这是一件什么事」。任务就是一张卡加上一段 `[task]`：
+
+```toml
+[task]
+title    = '订单台账'
+purpose  = '把后台订单列表整理成一张能按订单号核对、能一直往下接的台账'
+source   = '订单管理后台 → 订单列表（登录后按页显示，每页 20 单）'
+created  = '2026-10-25'
+expected = '每单一行，订单号唯一；金额保持页面原文（含 ¥ 与千分位）'
+```
+
+这段**只给人看，不参与解析**：删掉它，新采的数据一个字都不会变。写它是因为一周后
+回来，`admin-order-list.toml` 这个名字不会告诉你「这抓的是哪个后台、想要什么结果」。
+
+任务命令：
+
+```bash
+clip2table task new --text-file page.txt        # 向导：生成卡
+clip2table task show order-ledger.toml          # 看任务：字段、主键、跑过几次
+clip2table task check order-ledger.toml --text-file page.txt   # 预览：字段对回原文哪一行
+clip2table task fix order-ledger.toml --field 金额 --kind search --pattern '...'  # 改一条规则
+clip2table task run -p order-ledger.toml -d out/orders          # 再跑一次
+```
+
+`task new` 是交互式的，会逐条问；加 `--yes` 全部取推断值——**给 agent 用的**。
+一个只有人能敲字时才工作的向导，在自动化场景里等于不能用。
+
+`task fix` 默认**不写盘**，只打印「这条规则会让哪些值变成什么」；确认后加 `--write`，
+它只替换那一个 `[fields.X]` 段，文件里其他字节不动。整份重写会丢注释和排版，而
+这种文件本来就是要手改的。
+
+### 按原文标记记录和字段
+
+先显示原文行号和记录归属：
+
+```powershell
+clip2table task check orders.toml --text-file page.txt --lines 30
+```
+
+如果输出列出编号候选，用 `--pick N` 预览另一种分段。此操作保留现有字段规则，
+加 `--write` 保存所选分段。加 `--json` 返回完整 JSON，包括所选候选、
+记录和字段来源行号。
+
+```powershell
+clip2table task check orders.toml --text-file page.txt --pick 1 --json
+clip2table task check orders.toml --text-file page.txt --pick 1 --write
+```
+
+候选保存为 `mode = "periodic"`，包含 `period`（每条记录的非空行数）、`offset`（跳过的非空行数）
+和 `count`（该区域的记录数上限）。区域前后的内容保留为未识别行；保存后重新加载使用同一规则。
+规则用于固定布局区域，页面记录数超过 `count` 时，剩余内容会显示在未识别行中。
+
+### 确认与任务指标
+
+```powershell
+clip2table task check orders.toml --text-file page.txt --confirm
+clip2table task show orders.toml --json
+```
+
+检查结果分别显示字段填充率、规则偏离和人工确认状态。`--confirm` 记录用户对当前规则与样本的确认；
+规则或样本变化后需重新确认。空结果、行数不守恒或必填字段等规则偏离会阻止确认。
+确认候选时同时加 `--write` 保存。首次配置耗时从进入创建向导计至首次确认，后续确认保留原始耗时。
+`task run --json` 返回单个 JSON 对象，`task_stats` 包含运行记录。
+
+### 保存记录边界
+
+保存记录边界时，标出首条完整记录在原文中的起止行。下面把第 3 到第 6 行作为示例：
+
+```powershell
+clip2table task new -p orders.toml --text-file page.txt --record-start 3 --record-end 6 --out corrected.toml --yes
+```
+
+两个边界参数一起使用，行号从 1 开始，结束行包含在示例中。行号包含空行；
+记录长度按非空行计算。工具从起始行生成锚点，核对整份样本中的重复起点，
+并用保存后的同一套分段规则预览。保存的 `record_lines` 会检查后续记录的长度变化。
+
+字段取错行时，指定该字段应读取的原文行号。这一行可以属于任意一条已解析记录：
+
+```powershell
+clip2table task fix corrected.toml --field 金额 --from-line 8 --text-file page.txt
+clip2table task fix corrected.toml --field 金额 --from-line 8 --text-file page.txt --write
+```
+
+也可以用第一条记录中只出现于一行的文字定位：
+
+```powershell
+clip2table task fix corrected.toml --field 金额 --value '¥100.00' --text-file page.txt --write
+```
+
+`--from-line` 和 `--value` 会生成读取整行的规则，将同一记录内位置应用到整批样本，
+并保留字段类型和数值换算参数。只提取行中的一部分内容时，使用 `--kind search --pattern`。
+空行、未归属记录的行、越界行号和多行命中的值会报出具体原因；修正加 `--write` 保存后，
+再次执行任务会使用新规则。
+
+`task run -d` 会把这次运行记进任务旁边的一个小文件（`任务名.stats.json`），
+于是 `task show` 能说出：
+
+```
+任务记录：这是第 2 次运行，这次 12 秒，从建任务到确认结果正确用了 2 分 10 秒，确认过 1 次结果正确，改过 1 次规则
+```
+
+记录包含运行次数、每次运行耗时、首次配置至确认耗时、人工确认次数、修正次数及成功重跑次数。
+
+记账文件坏了不会让采集失败：读不出来就当没有记录，继续采。记录不值这个代价。
+
+---
+
+## 10. 安全边界（desktop 通道）
 
 E2 是用操作系统的按键通道往窗口里发键，**它能造成真实后果**。所以它有三道闸：
 
@@ -317,7 +478,7 @@ E2 是用操作系统的按键通道往窗口里发键，**它能造成真实后
 
 ---
 
-## 10. 使用条件
+## 11. 使用条件
 
 采集对象需要提供可选中、可复制的文本，适用于用户已登录的页面、桌面客户端列表、
 Excel 选中区域和本地文本窗口。
@@ -327,7 +488,7 @@ Excel 选中区域和本地文本窗口。
 
 ---
 
-## 11. 数据处理
+## 12. 数据处理
 
 源文本按归属记录到解析结果或未识别清单，报告统计两者占用的源行数。
 未识别内容随导出结果保存为同名 `.unparsed.txt` 文件。
@@ -339,7 +500,7 @@ Excel 选中区域和本地文本窗口。
 
 ---
 
-## 12. 开发
+## 13. 开发
 
 ```bash
 python -m unittest discover -s tests -t .     # 全量

@@ -16,8 +16,15 @@ from ..pipeline.extract import KINDS, TYPES, FieldSpec
 CHANNELS = ("http", "browser", "desktop")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 TOP_KEYS = {"schema", "name", "channel", "harvest", "target", "fetch",
-            "segment", "fields", "paging", "dedupe", "samples"}
-SEGMENT_MODES = ("anchor", "blank", "single", "lines")
+            "segment", "fields", "paging", "dedupe", "samples", "task"}
+SEGMENT_MODES = ("anchor", "blank", "single", "lines", "periodic")
+# What a task says about itself. Kept inside the card file on purpose: a task
+# that lives somewhere else drifts from the rules it claims to run, and the
+# first thing a user does after a bad page is open the rules. `stats` is the
+# one exception (see tasks.py) - it changes on every run and must not rewrite
+# a hand-edited file.
+TASK_KEYS = {"title", "purpose", "source", "sample", "created", "expected",
+             "notes"}
 
 
 @dataclass
@@ -30,6 +37,9 @@ class Card:
     anchor_next: str | None = None
     min_lines: int = 1
     segment_mode: str = "anchor"
+    segment_period: int | None = None
+    segment_offset: int = 0
+    segment_count: int | None = None
     skip_header: bool = False
     dedupe_key: list[str] = field(default_factory=list)
     on_collision: str = "report_only"
@@ -66,11 +76,22 @@ class Card:
     target: dict[str, Any] = field(default_factory=dict)
     fetch: dict[str, Any] = field(default_factory=dict)
     samples: str | None = None
+    # `[task]`: who this card is for and what it is supposed to produce. All
+    # optional, all display-only. Nothing in the pipeline reads it, so a card
+    # without it runs exactly as before -- which is what lets this arrive
+    # without a schema bump.
+    task: dict[str, Any] = field(default_factory=dict)
     path: str = ""
 
     @property
     def field_names(self) -> list[str]:
         return [f.name for f in self.fields]
+
+    @property
+    def title(self) -> str:
+        """Display name: `[task].title`, else the card name."""
+        t = self.task.get("title")
+        return str(t) if isinstance(t, str) and t.strip() else self.name
 
 
 def parse_card(data: dict[str, Any], path: str = "") -> Card:
@@ -101,6 +122,17 @@ def parse_card(data: dict[str, Any], path: str = "") -> Card:
     mode = seg.get("mode", "anchor")
     if mode not in SEGMENT_MODES:
         raise InputError(f"{path}: [segment].mode 只能是 {SEGMENT_MODES}，实际是 {mode!r}")
+
+    period, offset, count = seg.get("period"), seg.get("offset", 0), seg.get("count")
+    if mode == "periodic":
+        for key, value, minimum in (("period", period, 1), ("offset", offset, 0),
+                                    ("count", count, 1)):
+            if key == "count" and value is None:
+                continue
+            if type(value) is not int or value < minimum:
+                raise InputError(f"{path}: [segment].{key} 必须是至少 {minimum} 的整数")
+    elif any(k in seg for k in ("period", "offset", "count")):
+        raise InputError(f"{path}: period / offset / count 只适用于 periodic 分段")
 
     anchor = seg.get("anchor")
     anchor_next = seg.get("anchor_next")
@@ -264,6 +296,7 @@ def parse_card(data: dict[str, Any], path: str = "") -> Card:
         name=name, schema=1, channel=channel, fields=specs,
         anchor=anchor, anchor_next=anchor_next,
         min_lines=int(seg.get("min_lines", 1)), segment_mode=mode,
+        segment_period=period, segment_offset=offset, segment_count=count,
         skip_header=skip_header,
         dedupe_key=list(key), on_collision=collision,
         identity_fields=list(identity), mutable_fields=list(mutable),
@@ -277,7 +310,47 @@ def parse_card(data: dict[str, Any], path: str = "") -> Card:
         fetch=dict(data.get("fetch") or {}),
         samples=samples, path=path,
         record_lines=record_lines, required=list(required),
+        task=_task(data.get("task"), path),
     )
+
+
+def _task(raw: Any, path: str) -> dict[str, Any]:
+    """`[task]`: free-form, but the keys are checked so a typo is caught.
+
+    Deliberately loose on values and strict on names. A task description is
+    prose the user wrote; a misspelled key is a silence that shows up later as
+    "why does my purpose not print anywhere".
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise InputError(f"{path}: [task] 必须是一张表",
+                         hint='写法是 [task] 换行 title = "订单台账"')
+    unknown = set(raw) - TASK_KEYS
+    if unknown:
+        raise InputError(f"{path}: [task] 里不认识的键 {sorted(unknown)}",
+                         hint=f"允许的是 {sorted(TASK_KEYS)}")
+    out: dict[str, Any] = {}
+    for k, v in raw.items():
+        if k in ("title", "purpose", "source", "sample", "created"):
+            if not isinstance(v, str):
+                raise InputError(f"{path}: [task].{k} 必须是字符串")
+            out[k] = v
+        elif k == "expected":
+            # What the user says a correct record looks like. Kept as a list of
+            # strings rather than a schema: it is read by a human in the preview
+            # header, not by a validator.
+            if isinstance(v, str):
+                out[k] = [v]
+            elif isinstance(v, list) and all(isinstance(x, str) for x in v):
+                out[k] = list(v)
+            else:
+                raise InputError(f"{path}: [task].expected 必须是字符串或字符串数组")
+        elif k == "notes":
+            if not isinstance(v, list) or any(not isinstance(x, str) for x in v):
+                raise InputError(f"{path}: [task].notes 必须是字符串数组")
+            out[k] = list(v)
+    return out
 
 
 def _record_lines(seg: dict[str, Any], path: str) -> tuple[int, int] | None:

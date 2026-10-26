@@ -230,14 +230,19 @@ def html_to_lines(html: str) -> list[str]:
     line, and a newline inside a cell would split one record into two. The grid
     returned by `html_to_grid` keeps the real break for callers that can use it.
     """
-    out: list[str] = []
+    return [text for _kind, text in html_line_blocks(html)]
+
+
+def html_line_blocks(html: str) -> list[tuple[str, str]]:
+    """The same flattened text as html_to_lines, retaining table-row membership."""
+    out: list[tuple[str, str]] = []
     for kind, block in html_to_blocks(html):
         if kind == "line":
             text = str(block)
             if text:
-                out.append(text)
+                out.append((kind, text))
             continue
         cells = [(" ".join(c.split("\n")) if "\n" in c else c) for c in block]
         if any(c for c in cells):
-            out.append("\t".join(cells))
+            out.append((kind, "\t".join(cells)))
     return out

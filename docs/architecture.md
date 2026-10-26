@@ -63,7 +63,7 @@
 | `__main__.py` | `python -m clip2table` | — |
 | `capabilities.py` | 一张能力表，校验 / 分发 / 帮助文案共用 | 不做取数 |
 
-`cli.py` 大是因为它要装下 8 个子命令的参数与展示，但每个子命令的实现都很薄：
+`cli.py` 大是因为它要装下 9 个子命令的参数与展示，但每个子命令的实现都很薄：
 取参数 → 调 `flow` 或 `core` → 打印。
 
 ### 取数层（通道）
@@ -106,13 +106,21 @@
 | `models.py` | `Captured` / `Row` / `ParseResult` / `FieldTrace` / `Conflict` |
 | `dataset.py`（约 1360 行） | 页提交、去重、冲突分类、状态、卡快照绑定 |
 | `flow.py` | 提交边界的唯一入口（`Committer`） |
+| `tasks.py` | 任务创建、样本确认、修正与运行记录；首次配置耗时和成功重跑次数 |
+| `taskflow.py` | 任务向导与规则修正：生成卡文本、`Fix`、整批效果对比 |
+| `preview.py` | 预览：表格 + 字段来源行 + 原文归属，全在终端里 |
 | `report.py` | 报告文本 / JSON 的渲染 |
+
+任务命令复用解析与采集入口。`taskflow.py` 收集配置，`marks.py` 将原文标记转换为规则，
+`preview.py` 展示结果，`tasks.py` 将过程记录写入 `<任务名>.stats.json`。
+候选分段以 `periodic` 保存到卡片，由 `core.parse_capture` 统一执行。
 
 ### 卡与渲染
 
 | 文件 | 职责 |
 |---|---|
 | `cards/schema.py` | TOML → `Card`，全部校验在这里 |
+| `cards/emit.py` | 字段与分段的 TOML 序列化，供任务创建和局部修正共用 |
 | `cards/loader.py` | 内置卡与外部卡的定位 |
 | `cards/regress.py` | `test` 子命令：样本 + 独立答案键比对 |
 | `render/text.py` | CSV / Markdown / JSONL |
@@ -239,7 +247,7 @@ mutable  = ["状态", "金额"]       # 这些变了 = 正常更新
 
 ## 6. 测试
 
-`tests/` 按模块切分，共 472 项（`python -m unittest discover -s tests -t .`）。
+`tests/` 按模块切分，共 539 项（`python -m unittest discover -s tests -t .`）。
 有三类测试值得单独说：
 
 - **守恒类**：任意输入下 `rows + unparsed == 源行数`。

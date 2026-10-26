@@ -13,6 +13,8 @@ clip2table 是一个面向 Windows 的文本转表格工具。它从网页、桌
 ## 功能
 
 - **结构识别**：识别表格、周期记录、键值对和编号列表，展示分段依据及候选结构。
+- **任务向导**：从样本配置字段、复合主键、采集来源与翻页，保存为可重复执行的任务。
+- **预览纠错**：定位字段来源、选择并保存分段、修正规则、确认样本，记录配置耗时与运行情况。
 - **规则卡片**：用 TOML 配置采集通道、记录边界、字段提取、去重和翻页。
 - **批量采集**：支持分页、数据累积和按通道恢复采集位置。
 - **数据记录**：保存原文、字段来源、解析状态、重复记录和内容冲突。
@@ -41,10 +43,10 @@ clip2table 是一个面向 Windows 的文本转表格工具。它从网页、桌
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/yjq123-zyh/clip2table/releases/latest) 下载 Python 安装包，或直接安装 `v0.1.0`：
+从 [GitHub Releases](https://github.com/yjq123-zyh/clip2table/releases/latest) 下载 Python 安装包，或直接安装 `v0.2.0`：
 
 ```powershell
-python -m pip install https://github.com/yjq123-zyh/clip2table/releases/download/v0.1.0/clip2table-0.1.0-py3-none-any.whl
+python -m pip install https://github.com/yjq123-zyh/clip2table/releases/download/v0.2.0/clip2table-0.2.0-py3-none-any.whl
 ```
 
 从源码安装：
@@ -57,37 +59,60 @@ python -m pip install -e .
 
 ## 使用
 
-复制需要整理的文本后，查看结构识别结果：
+从样本创建任务，按提示填写字段名、主键、通道、来源和翻页方式：
 
 ```powershell
-clip2table infer
+clip2table task new --text-file page.txt --out mysite.toml
 ```
 
-读取剪贴板并导出 CSV：
+预览字段与原文，确认后记录结果：
 
 ```powershell
-clip2table run -o result.csv
+clip2table task check mysite.toml --text-file page.txt --lines 30
+clip2table task check mysite.toml --text-file page.txt --confirm
 ```
 
-读取网页并预览前三条记录：
+表格、字段的来源行、原文每行归哪条记录会一起打出来。字段取错行时改一条规则，
+先看整批效果，确认后再存：
 
 ```powershell
+clip2table task fix mysite.toml --field 金额 --from-line 5 --text-file page.txt
+clip2table task fix mysite.toml --field 金额 --from-line 5 --text-file page.txt --write
+```
+
+这里的 `5` 是预览显示的原文行号。也可以用 `--value '¥100.00'` 定位第一条记录中的
+取值行，或使用正则提取行中的部分内容：
+
+```powershell
+clip2table task fix mysite.toml --field 金额 --kind search --pattern '¥\s*(?P<v>[0-9,]+\.[0-9]{2})' --text-file page.txt
+clip2table task fix mysite.toml --field 金额 --kind search --pattern '...' --text-file page.txt --write
+```
+
+分段需要调整时，可用 `task check ... --pick N` 预览编号候选，加 `--write` 保存；创建任务时用
+`--record-start 3 --record-end 6` 标记首条完整记录的边界。操作示例见
+[按原文标记记录和字段](docs/usage.md#按原文标记记录和字段)。
+
+之后每次要新数据，一条命令接着采：
+
+```powershell
+clip2table task run -p mysite.toml -d out/orders --max-pages 20 --yes
+clip2table export -d out/orders -f csv -f xlsx --dir out
+```
+
+`task show mysite.toml` 会告诉你这个任务跑过几次、首次耗时多少、改过几次规则、
+其中几次重跑不用再改。完整参数和操作步骤见 [使用说明](docs/usage.md)；
+一个从头到尾走通的例子在 [scenes/order-ledger](scenes/order-ledger/)。
+
+**已经有卡**，也可以直接走底层命令：
+
+```powershell
+clip2table infer                                    # 看剪贴板里的文本是什么结构
+clip2table run -o result.csv                        # 剪贴板 → CSV
 clip2table run --url https://example.com/list --show 3
-```
-
-生成规则卡片：
-
-```powershell
-clip2table infer --write-card mysite.toml
-```
-
-调整卡片中的目标地址或窗口、字段和翻页规则后，执行分页采集：
-
-```powershell
 clip2table harvest -p mysite.toml --max-pages 20 --yes -f csv -f xlsx --dir out
 ```
 
-内置卡片覆盖公告、后台表格、内容块、招聘信息和编号列表，可用作配置参考。完整参数和操作步骤见 [使用说明](docs/usage.md)。
+内置卡片覆盖公告、后台表格、内容块、招聘信息和编号列表，可用作配置参考。
 
 ## 使用条件
 
@@ -99,12 +124,13 @@ clip2table harvest -p mysite.toml --max-pages 20 --yes -f csv -f xlsx --dir out
 
 | 内容 | 链接 |
 |---|---|
-| 使用方法与卡片配置 | [使用说明](docs/usage.md) |
+| 使用方法、卡片与任务配置 | [使用说明](docs/usage.md) |
 | 模块职责与数据流 | [架构说明](docs/architecture.md) |
 | 设计取舍 | [设计记录](docs/design-notes.md) |
 | 验收记录 | [验证记录](docs/verification.md) |
 | 版本发布与 PyPI 配置 | [发布说明](docs/publishing.md) |
 | Agent 操作流程 | [SKILL.md](SKILL.md) |
+| 完整走通的例子 | [订单台账场景包](scenes/order-ledger/) |
 | 版本变化 | [CHANGELOG.md](CHANGELOG.md) |
 | 著作权、授权与使用责任 | [NOTICE.md](NOTICE.md) |
 | 历史材料 | [docs/history](docs/history/) |

@@ -1229,6 +1229,9 @@ def _card_fingerprint(card) -> dict[str, Any]:
             "skip_header": bool(getattr(card, "skip_header", False)),
             "record_lines": list(getattr(card, "record_lines", None) or []),
             "required": list(getattr(card, "required", []) or []),
+            **({"period": card.segment_period, "offset": card.segment_offset,
+                "count": card.segment_count}
+               if getattr(card, "segment_mode", "") == "periodic" else {}),
         },
         "dedupe": {
             "keys": list(getattr(card, "dedupe_key", []) or []),

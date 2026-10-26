@@ -1,12 +1,12 @@
-# 整改验收记录（两轮，各 8 项）
+# 验证记录
 
 对应用户先后提出的两批产品评审意见（第 1–8 节、第 10 节各一批），外加第 11 节的三处成本问题。
 每条写三件事：**改了什么**、**怎么验**、**验出了什么**。
 这里只记当前状态；M1–M4 的历史验收过程在 `history/VERIFY.md`。
 
 环境：Windows 11、Python 3.12.6、零第三方依赖。
-全量：`python -m unittest discover -s tests -t .` → **472 tests OK**。
-`python _dev/c2t.py selftest` → `SKILL.md` + `README.md` + `docs/` 里的 8 个子命令全部存在。
+全量（2026-10-26）：`python -m unittest discover -s tests -t .` → **539 tests OK**。
+`python _dev/c2t.py selftest` → `SKILL.md` + `README.md` + `docs/` 里的 9 个子命令全部存在。
 
 ---
 
@@ -154,7 +154,7 @@ file ｜ FILE ｜ card ｜ 2 行 × 5 列 ｜ 未识别 0 行
 末尾指向三份文档。
 
 **怎么验**：`selftest` 仍通过（`SKILL.md` + `docs/` 与真实 argparser 对账）；
-全量测试 472 项通过（当时是 399 项，后续两轮整改又加了一批）；四份历史文件顶部横幅已加。
+全量测试 519 项通过（当时是 399 项，后续两轮整改又加了一批）；四份历史文件顶部横幅已加。
 
 **验出了什么**：新读者不用自己追"哪些已实现、哪些已改变、哪些还是预留"。
 
@@ -178,7 +178,7 @@ file ｜ FILE ｜ card ｜ 2 行 × 5 列 ｜ 未识别 0 行
 
 ```
 py -3 _dev/c2t.py selftest        # ✓ SKILL.md、README.md、usage.md、architecture.md、design-notes.md
-                                  #   里的 8 个子命令全部存在
+                                  #   里的 9 个子命令全部存在
 py -3 -m unittest discover -s tests -t .   # 399 tests OK
 ```
 
@@ -208,7 +208,7 @@ py -3 -m unittest discover -s tests -t .   # 399 tests OK
 | 7 | 卡指纹只覆盖部分配置，改 `line.pattern` 或 `skip_header` 不改指纹，旧数据被静默重解 | 指纹覆盖全部影响解析结果的配置（字段规格、分段、去重、翻页）；每页存卡快照；卡变了拒绝继续，要显式 `--allow-card-change` | `tests/test_card_binding.py`（14 项） |
 | 8 | xlsx 直接截断超长单元格、删非法字符且不报；markdown 表头不转义，字段名含 `\|` 就把表撑坏 | 渲染返回 `Change` 明细（行、字段、原因）；超长值另写配套 `.full.jsonl` 保留原文；markdown 表头与正文用同一套转义 | `tests/test_render_lossless.py`（8 项）+ 真 CLI 探针 `_probe/item8_export.py` |
 
-**怎么验**：全量 **472 tests OK**。第 8 条另有真 CLI 证据——
+**怎么验**：全量 **519 tests OK**。第 8 条另有真 CLI 证据——
 用一个 40000 字符的单元格跑 `run -o out.xlsx`，配套 `out.full.jsonl` 里该值 40000 字符原样完整；
 字段名写成 `名|称` 导出 markdown，表头是 `名\|称`，列数仍为 2。
 
@@ -249,7 +249,7 @@ wheel 里只有 `src/`，没有 `SKILL.md` 和 `docs/`，所以这个分支在�
 **怎么验**：
 - `tests/test_selftest.py` 新增 `TestNothingToCheckIsAFailure` 2 项：路径列表为空 → 非 0；
   路径指向一个空临时目录（模拟装机）→ 非 0 且报出找过的文件名。
-- 仓库根：`py -3 _dev/c2t.py selftest` → `✓ …8 个子命令全部存在`，退出 0。
+- 仓库根：`py -3 _dev/c2t.py selftest` → `✓ …9 个子命令全部存在`，退出 0。
 - 装好的副本（`/tmp/cleanvenv` 从源码 `pip install .`）：`clip2table selftest` → 退出 **2**，
   并打印出 `…\cleanvenv\Lib\SKILL.md` 等实际找过的路径。
 - CI 加了对应一步：`.github/workflows/tests.yml` 的 `package` 作业里，
@@ -268,14 +268,33 @@ wheel 里只有 `src/`，没有 `SKILL.md` 和 `docs/`，所以这个分支在�
 **怎么验**（全新 venv `/tmp/sdvenv`，先 `tar xzf` 再 `pip install .`）：
 - sdist 顶层现在有 `SKILL.md README.md CHANGELOG.md MANIFEST.in`，目录含
   `docs/`(10) `fixtures/`(9) `_dev/`(2)。
-- 解压后 `python -m unittest discover -s tests -t .` → **472 tests OK**。
-- 解压后 `python _dev/c2t.py selftest` → 退出 0（`✓ …8 个子命令全部存在`）；
+- 解压后 `python -m unittest discover -s tests -t .` → **519 tests OK**。
+- 解压后 `python _dev/c2t.py selftest` → 退出 0（`✓ …9 个子命令全部存在`）；
   同一 venv 里用装好的 `clip2table.exe selftest` → 退出 2，正是 12.1 要求的两种结果。
 
 ---
 
-## 还没做的
+## 13. 任务创建、纠错与重复采集（2026-10-26）
 
-- `docs/history/VERIFY.md` 里写的 292 项是当时的数字，现在是 472。**故意不改**——
-  它是历史记录，改了就变成伪证。
-- 文档里没有截图。命令输出就是证据，图片会过期。
+验证命令：
+
+```powershell
+python -m unittest tests.test_marks tests.test_taskflow tests.test_scene tests.test_resume_restore tests.test_paging
+python -m unittest discover -s tests -t .
+```
+
+定向验证覆盖任务、分段、场景和分页，并补充浏览器来源替换用例；最终全量 539 项通过，耗时 11.856 秒。
+
+| 路径 | 验证结果 |
+| --- | --- |
+| 规则持久化 | 字段正则与换算参数保存后重读一致；候选分段保存后，记录数、值与来源行号和预览一致 |
+| 卡片转换 | 复合主键、冲突策略、身份与可变字段保留，字段重命名同步引用 |
+| 来源配置 | 向导生成 HTTP 页码模板、浏览器目标与按钮选择器、桌面目标与翻页按键 |
+| 结果确认 | 确认绑定规则与样本；改变任一项后确认状态更新；首次配置耗时保留首次值 |
+| 质量与运行记录 | 展示填充率、必填字段缺失和记录长度偏离；失败运行计入统计；JSON 输出可直接解析 |
+| 两页采集与再次执行 | 本地 HTTP 服务返回两个 HTML 表格页面；同一任务卡分别采集到两个新数据集，两个导出文件均与手工答案逐字节一致（11 条订单） |
+| HTML 来源定位 | 导航文字保留为未识别内容，字段来源保持对应原文行 |
+| 浏览器页码导航 | 模拟 CDP 客户端验证从第一页开始、导航第二页和独立重跑 |
+
+订单场景的 HTTP 请求使用实际本地服务；浏览器翻页测试使用模拟客户端。测试均使用临时任务副本和数据目录。
+详细操作见 [订单台账示例](../scenes/order-ledger/README.md)。

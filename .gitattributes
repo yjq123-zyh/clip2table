@@ -1,9 +1,12 @@
-# 仓库里的文本一律 LF 存储、LF 检出。
+# 仓库文本默认以 LF 存储和检出；CSV 导出基准保留 CRLF。
 #
 # 这不是风格偏好：fixtures/ 和内置卡的 samples/ 是逐字节比对的回归基准。
 # 如果让 core.autocrlf 把它们换成 CRLF，就会出现「在本机通过、克隆下来失败」——
 # 一个只在别人机器上复现的 bug，是这类项目最难查的那种。
 * text=auto eol=lf
+
+# CSV gold files preserve the writer's CRLF bytes for export comparisons.
+scenes/order-ledger/output/*.csv -text whitespace=cr-at-eol
 
 *.png binary
 *.jpg binary

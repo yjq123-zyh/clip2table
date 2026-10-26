@@ -33,6 +33,19 @@ class Segmented:
     # skipped table header. Without this the conservation check would report a
     # phantom lost line for every clean table with a header.
     extra_consumed: int = 0
+    # Index into the line list this segmenter was handed, one per record.
+    # A trace can say "record 7, line 2"; without this the reader still has to
+    # count records by hand to find that line in the pasted text, which is
+    # exactly the manual work the preview is supposed to remove. A short list
+    # means "unknown", never zero.
+    record_starts: list[int] = field(default_factory=list)
+    # One list per record: the index in the source of each of its lines, in
+    # order. The start alone cannot answer "which line did this value come
+    # from" whenever blank lines sit inside a record, because the record drops
+    # them and every later offset then points one or more lines too early.
+    # Keeping the whole mapping is what makes every line's location exact
+    # rather than derived. A short list means "unknown", never zero.
+    record_lines: list[list[int]] = field(default_factory=list)
 
     @property
     def consumed_lines(self) -> int:
@@ -101,6 +114,9 @@ def _segment_anchored(lines: list[str], anchor: str, anchor_next: str | None,
         chunk = [ln for ln in lines[start:end] if ln.strip()]
         if chunk:
             seg.records.append(chunk)
+            seg.record_starts.append(start)
+            seg.record_lines.append(
+                [i for i in range(start, end) if lines[i].strip()])
 
     return seg
 
@@ -108,14 +124,20 @@ def _segment_anchored(lines: list[str], anchor: str, anchor_next: str | None,
 def _segment_blank(lines: list[str], total: int) -> Segmented:
     seg = Segmented(total_lines=total, method="blank")
     cur: list[str] = []
-    for ln in lines:
+    cur_at: list[int] = []
+    for i, ln in enumerate(lines):
         if ln.strip():
             cur.append(ln)
+            cur_at.append(i)
         elif cur:
             seg.records.append(cur)
-            cur = []
+            seg.record_starts.append(cur_at[0])
+            seg.record_lines.append(cur_at)
+            cur, cur_at = [], []
     if cur:
         seg.records.append(cur)
+        seg.record_starts.append(cur_at[0])
+        seg.record_lines.append(cur_at)
     return seg
 
 
@@ -462,10 +484,15 @@ def anchor_period(lines: list[str]) -> tuple[int, int]:
 def segment_auto(lines: list[str], level: str) -> Segmented:
     """Segment without a card, guided by the sniff level."""
     total = len([ln for ln in lines if ln.strip()])
+    # `record_starts` must index the list this function was handed, so the
+    # positions survive the filtering the branches below do.
+    where = [i for i, ln in enumerate(lines) if ln.strip()]
 
     if level == "tsv":
         recs = [[ln] for ln in lines if ln.strip()]
-        return Segmented(records=recs, total_lines=total, method="tsv")
+        return Segmented(records=recs, total_lines=total, method="tsv",
+                         record_starts=where,
+                         record_lines=[[i] for i in where])
 
     if level == "kv":
         return _segment_kv(lines, total)
@@ -477,42 +504,55 @@ def segment_auto(lines: list[str], level: str) -> Segmented:
         return _slice_by_starts(lines, starts, total, "numbered")
 
     if level == "anchored":
-        return _segment_periodic([ln for ln in lines if ln.strip()], total)
+        return _segment_periodic([ln for ln in lines if ln.strip()], total, where)
 
     # lines: one record per line, single raw column. S4 is a real answer.
     return Segmented(records=[[ln] for ln in lines if ln.strip()],
-                     total_lines=total, method="lines")
+                     total_lines=total, method="lines", record_starts=where,
+                     record_lines=[[i] for i in where])
 
 
 def _segment_kv(lines: list[str], total: int) -> Segmented:
     filled = [ln for ln in lines if ln.strip()]
-    return Segmented(records=[[ln] for ln in filled], total_lines=total, method="kv")
+    where = [i for i, ln in enumerate(lines) if ln.strip()]
+    return Segmented(records=[[ln] for ln in filled], total_lines=total,
+                     method="kv", record_starts=where,
+                     record_lines=[[i] for i in where])
 
 
-def _segment_periodic(filled: list[str], total: int) -> Segmented:
+def _segment_periodic(filled: list[str], total: int,
+                      where: list[int] | None = None) -> Segmented:
     """Split the periodic region into records, leaving the chrome to unparsed.
 
     The lines before the region (navigation, filters) and the partial record at
     either edge are not thrown away - they go to `unparsed`, so a human can see
     what the machine could not place. Discarding them would make conservation
     look perfect while data vanished.
+
+    `where` maps an index in `filled` back to the caller's unfiltered line
+    list, so `record_starts` means the same thing for every segmenter.
     """
+    where = where if where is not None else list(range(len(filled)))
     region = anchor_region(filled)
     if region is None or region.period < 2:
         return Segmented(records=[[ln] for ln in filled], total_lines=total,
-                         method="lines")
+                         method="lines", record_starts=list(where),
+                         record_lines=[[i] for i in where])
 
     p = region.period
     base = region.start + region.offset
     count = max(0, (region.end - base) // p)
     if count < 1:
         return Segmented(records=[[ln] for ln in filled], total_lines=total,
-                         method="lines")
+                         method="lines", record_starts=list(where),
+                         record_lines=[[i] for i in where])
 
     seg = Segmented(total_lines=total, method="anchored")
     seg.unparsed.extend(filled[:base])
     for k in range(count):
         seg.records.append(filled[base + k * p:base + (k + 1) * p])
+        seg.record_starts.append(where[base + k * p])
+        seg.record_lines.append(where[base + k * p:base + (k + 1) * p])
     seg.unparsed.extend(filled[base + count * p:])
     if region.start:
         seg.notes.append(
@@ -527,6 +567,9 @@ def _slice_by_starts(lines: list[str], starts: list[int], total: int,
     if not starts:
         seg.records = [[ln] for ln in lines if ln.strip()]
         seg.method = "lines"
+        at = [i for i, ln in enumerate(lines) if ln.strip()]
+        seg.record_starts = at
+        seg.record_lines = [[i] for i in at]
         seg.notes.append("有分级信号但找不到起点，退化为一行一记录")
         return seg
     if starts and starts[0] > 0:
@@ -536,4 +579,7 @@ def _slice_by_starts(lines: list[str], starts: list[int], total: int,
         chunk = [ln for ln in lines[s:e] if ln.strip()]
         if chunk:
             seg.records.append(chunk)
+            seg.record_starts.append(s)
+            seg.record_lines.append(
+                [i for i in range(s, e) if lines[i].strip()])
     return seg

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clip2table"
-version = "0.1.0"
+version = "0.2.0"
 description = "把屏幕上看得到、选得中的任何内容，变成一张结构化表"
 readme = "README.md"
 requires-python = ">=3.11"

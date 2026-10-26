@@ -17,8 +17,8 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-from ..models import Captured, ParseResult, Row
-from .extract import FieldSpec
+from ..models import Captured, FieldTrace, ParseResult, Row
+from .extract import FieldSpec, _one as _extract_one
 from .htmltable import html_to_lines
 from .normalize import collapse_ws, normalize_text, to_lines
 from .segment import (align_alternatives, anchor_period, anchor_regions,
@@ -42,6 +42,10 @@ class Alternate:
     consumed: int
     unparsed: int
     sample: list[list[str]] = field(default_factory=list)
+    # Where the first record starts, relative to the first non-empty line.
+    # Without it, "try the second reading" cannot be acted on: the period alone
+    # does not say which of the two rotations was meant.
+    offset: int = 0
 
     def line(self) -> str:
         return (f"{self.level}：每 {self.period} 行一条 → {self.record_count} 条 × "
@@ -163,7 +167,8 @@ def _alternate_of(r, filled: list[str], why: str, kind: str,
     return Alternate(level="S1", why=f"{why}（{kind}）", period=r.period,
                      field_count=r.period, record_count=len(recs),
                      consumed=max(0, consumed),
-                     unparsed=max(0, len(filled) - consumed), sample=recs)
+                     unparsed=max(0, len(filled) - consumed), sample=recs,
+                     offset=base)
 
 
 def _capture_to_text(cap: Captured) -> str:
@@ -174,18 +179,83 @@ def _capture_to_text(cap: Captured) -> str:
 
 def _wrap(rows: list[Row], fields: list[str], level: str, sn: Sniff,
           unparsed: list[str], total: int, notes: list[str],
-          consumed: int | None = None) -> InferResult:
+          consumed: int | None = None,
+          starts: list[int] | None = None) -> InferResult:
     """Build the result. `consumed` must be counted from the records, not
     derived from the total - deriving it makes the conservation check
     unfailable, which is the same as not having one.
+
+    `starts` carries each record's offset in the source line list, so a
+    preview can point at 原文 without the caller re-segmenting. Omitting it
+    leaves `source_line` as None, which the preview prints as "未记录" rather
+    than a wrong number.
     """
     if consumed is None:
         consumed = sum(len(r.raw_lines) for r in rows)
+    if starts is not None:
+        for i, row in enumerate(rows):
+            if i < len(starts):
+                row.source_line = starts[i]
     res = ParseResult(rows=rows, fields=fields, unparsed=unparsed,
                       total_lines=total, consumed_lines=consumed,
                       level=level, notes=notes)
     sample = [{f: r.values.get(f) for f in fields} for r in rows[:3]]
     return InferResult(result=res, level=level, sniff=sn, sample=sample, notes=notes)
+
+
+def _positions(lines: list[str]) -> tuple[list[str], list[int]]:
+    """Non-empty lines plus the index each came from in the original list.
+
+    Every infer branch filters blanks; carrying the offset from the start is
+    what keeps `source_line` meaning "line N of the pasted text" instead of
+    "line N of what survived filtering".
+    """
+    idx = [i for i, ln in enumerate(lines) if ln.strip()]
+    return [lines[i] for i in idx], idx
+
+
+def _attach_traces(rows: list[Row], specs: list[FieldSpec]) -> None:
+    """Give infer-only rows the same provenance card-parsed rows have.
+
+    Without this, a preview of a *guess* can show a value but not say which
+    line it came from, and the one moment a user most needs to check the rule
+    is before any card exists.
+
+    A `line` cell knows its own index, so it is filled in directly. Everything
+    else is resolved through the same primitive a card would use, because a
+    `search` rule's answer ("规格：黑色" -> line 3) cannot be guessed from the
+    column number, and a guessed line number is worse than none.
+    """
+    for row in rows:
+        done: dict[str, object] = {}
+        for spec in specs:
+            if spec.kind == "line":
+                i = spec.index
+                idx = i if i >= 0 else len(row.raw_lines) + i
+                if 0 <= idx < len(row.raw_lines):
+                    row.traces[spec.name] = FieldTrace(
+                        field=spec.name, kind=spec.kind, raw=row.raw_lines[idx],
+                        line=idx, rule=spec.describe_rule())
+                continue
+            if spec.kind == "cell" and spec.col is not None:
+                if 0 <= spec.col < len(row.raw_lines):
+                    row.traces[spec.name] = FieldTrace(
+                        field=spec.name, kind=spec.kind,
+                        raw=row.raw_lines[spec.col], line=spec.col,
+                        rule=spec.describe_rule())
+                continue
+            if spec.kind not in ("search", "span"):
+                continue
+            try:
+                hit = _extract_one(row.raw_lines, spec, done)
+            except (ValueError, re.error):
+                continue
+            if hit.line is None:
+                continue
+            row.traces[spec.name] = FieldTrace(
+                field=spec.name, kind=spec.kind, status=hit.status,
+                raw=hit.raw, line=hit.line, detail=hit.detail,
+                rule=spec.describe_rule())
 
 
 # ------------------------------------------------------------------ S0
@@ -204,7 +274,7 @@ def _s0(sn: Sniff, lines: list[str]) -> InferResult:
     lines with that exact count become records. Everything else is preserved in
     unparsed instead of being reshaped into a row it never was.
     """
-    filled = [ln for ln in lines if ln.strip()]
+    filled, where = _positions(lines)
     total = len(filled)
     if not filled:
         return _s4(sn, lines)
@@ -237,24 +307,30 @@ def _s0(sn: Sniff, lines: list[str]) -> InferResult:
                      f"已保留在未识别里")
 
     rows: list[Row] = []
-    for line in data:
+    starts: list[int] = []
+    for pos, line in zip(range(len(filled)), filled):
+        if line not in data:
+            continue
         cells = line.split("\t")
         vals = {f: (cells[i].strip() or None) if i < len(cells) else None
                 for i, f in enumerate(fields)}
         if any(v for v in vals.values()):
             rows.append(Row(values=vals, raw_lines=[line]))
+            starts.append(where[pos])
 
     specs = [FieldSpec(name=f, kind="cell", col=i) for i, f in enumerate(fields)]
     consumed = len(rows) + (1 if has_header else 0)
-    out = _wrap(rows, fields, "S0", sn, others, total, notes, consumed=consumed)
+    out = _wrap(rows, fields, "S0", sn, others, total, notes, consumed=consumed,
+                starts=starts)
     out.specs = specs
+    _attach_traces(rows, specs)
     return out
 
 
 # ------------------------------------------------------------------ S1
 
 def _s1(sn: Sniff, lines: list[str], period: int) -> InferResult:
-    filled = [ln for ln in lines if ln.strip()]
+    filled, where = _positions(lines)
     total = len(filled)
     seg = segment_auto(filled, "anchored")
     if not seg.records:
@@ -271,8 +347,12 @@ def _s1(sn: Sniff, lines: list[str], period: int) -> InferResult:
         rows.append(Row(values=vals, raw_lines=list(rec)))
     notes = [f"S1：按周期锚点切成 {len(rows)} 条记录（每 {period} 行一条）",
              "列名按每列的形态推断，键值列已去掉「键：」前缀，可在卡里改成业务名"]
-    out = _wrap(rows, fields, "S1", sn, list(seg.unparsed), total, notes)
+    starts = [where[s] for s in seg.record_starts
+              if 0 <= s < len(where)] if seg.record_starts else None
+    out = _wrap(rows, fields, "S1", sn, list(seg.unparsed), total, notes,
+                starts=starts)
     out.specs = _s1_specs(fields, seg.records)
+    _attach_traces(rows, out.specs)
     return out
 
 
@@ -353,17 +433,19 @@ def _cell_kind(text: str) -> str:
 # ------------------------------------------------------------------ S2
 
 def _s2(sn: Sniff, lines: list[str]) -> InferResult:
-    filled = [ln for ln in lines if ln.strip()]
+    filled, where = _positions(lines)
     total = len(filled)
     pairs: list[tuple[str, str]] = []
     # Lines that are not key:value are not silently discarded: they go to
     # unparsed, because the only thing worse than a missing field is data
     # that disappeared from the report entirely.
     leftover: list[str] = []
-    for ln in filled:
+    at: list[int] = []          # source offset of each pair, parallel to `pairs`
+    for pos, ln in enumerate(filled):
         m = _KV_RE.match(ln)
         if m:
             pairs.append((collapse_ws(m.group(1)), m.group(2).strip()))
+            at.append(where[pos])
         else:
             leftover.append(ln)
     if not pairs:
@@ -373,30 +455,48 @@ def _s2(sn: Sniff, lines: list[str]) -> InferResult:
     if repeated:
         boundary = repeated[0]
         blocks: list[list[tuple[str, str]]] = []
+        starts: list[int] = []
         cur: list[tuple[str, str]] = []
-        for k, v in pairs:
+        cur_start = 0
+        for (k, v), pos in zip(pairs, at):
             if k == boundary and cur:
                 blocks.append(cur)
+                starts.append(cur_start)
                 cur = []
+            if not cur:
+                cur_start = pos
             cur.append((k, v))
         if cur:
             blocks.append(cur)
+            starts.append(cur_start)
 
         fields = list(dict.fromkeys(k for b in blocks for k, _ in b))
         rows = [Row(values={f: (dict(b).get(f) or None) for f in fields},
                     raw_lines=[f"{k}{'：'}{v}" for k, v in b]) for b in blocks]
         notes = [f"S2：键值对，按重复出现的「{boundary}」切成 {len(rows)} 条",
                  "每行一个字段，源里没有的字段留空"]
-        out = _wrap(rows, fields, "S2", sn, leftover, total, notes)
+        out = _wrap(rows, fields, "S2", sn, leftover, total, notes, starts=starts)
         out.specs = [FieldSpec(name=f, kind="search",
                                pattern=rf"^\s*{re.escape(f)}[:：]\s*(?P<v>.*)$")
                      for f in fields]
+        # One raw line per kv pair, in source order, so a field's index inside
+        # the record is also its offset from the block's first line.
+        for row, b in zip(rows, blocks):
+            order = {k: i for i, (k, _) in enumerate(b)}
+            for spec in out.specs:
+                i = order.get(spec.name)
+                if i is None:
+                    continue
+                row.traces[spec.name] = FieldTrace(
+                    field=spec.name, kind="search", raw=row.raw_lines[i],
+                    line=i, rule=spec.describe_rule())
         return out
 
     rows = [Row(values={"key": k, "value": v}, raw_lines=[f"{k}：{v}"])
             for k, v in pairs]
     notes = ["S2：键值对，没有重复键，按两列输出（key/value）"]
-    out = _wrap(rows, ["key", "value"], "S2", sn, leftover, total, notes)
+    out = _wrap(rows, ["key", "value"], "S2", sn, leftover, total, notes,
+                starts=at)
     out.specs = [FieldSpec(name="key", kind="line", index=0),
                  FieldSpec(name="value", kind="line", index=0)]
     return out
@@ -405,9 +505,10 @@ def _s2(sn: Sniff, lines: list[str]) -> InferResult:
 # ------------------------------------------------------------------ S3
 
 def _s3(sn: Sniff, lines: list[str]) -> InferResult:
-    filled = [ln for ln in lines if ln.strip()]
+    filled, where = _positions(lines)
     total = len(filled)
     numbered = [ln for ln in filled if _NUM_RE.match(ln)]
+    numbered_at = [where[pos] for pos, ln in enumerate(filled) if _NUM_RE.match(ln)]
     leftover = [ln for ln in filled if not _NUM_RE.match(ln)]
 
     # Only the number prefix is stripped; the rest of the line is kept as-is.
@@ -426,31 +527,36 @@ def _s3(sn: Sniff, lines: list[str]) -> InferResult:
                                 for i, f in enumerate(fields)}, raw_lines=[ln])
                     for p, ln in zip(parts, numbered)]
             notes = [f"S3：去掉序号后按「{sep}」切出 {ncols} 列，共 {len(rows)} 行"]
-            out = _wrap(rows, fields, "S3", sn, leftover, total, notes)
+            out = _wrap(rows, fields, "S3", sn, leftover, total, notes,
+                        starts=numbered_at)
             out.specs = [FieldSpec(name=f, kind="cell", col=i)
                          for i, f in enumerate(fields)]
+            _attach_traces(rows, out.specs)
             return out
 
     rows = [Row(values={"index": i + 1, "text": b}, raw_lines=[ln])
             for i, (b, ln) in enumerate(zip(body, numbered))]
     notes = ["S3：有序号但没有稳定分隔符，输出 index + text 两列"]
-    out = _wrap(rows, ["index", "text"], "S3", sn, leftover, total, notes)
+    out = _wrap(rows, ["index", "text"], "S3", sn, leftover, total, notes,
+                starts=numbered_at)
     out.specs = [FieldSpec(name="index", kind="line", index=0),
                  FieldSpec(name="text", kind="line", index=0)]
+    _attach_traces(rows, [out.specs[1]])
     return out
 
 
 # ------------------------------------------------------------------ S4
 
 def _s4(sn: Sniff, lines: list[str]) -> InferResult:
-    filled = [ln for ln in lines if ln.strip()]
+    filled, where = _positions(lines)
     total = len(filled)
     rows = [Row(values={"raw": ln}, raw_lines=[ln]) for ln in filled]
     notes = ["S4：没找到记录边界，按一行一记录输出单列 raw",
              "这不是失败：源文本里确实没有可切分的重复结构",
              "要让多行变成一条记录，用 -p 指定一张卡的 [segment]"]
-    out = _wrap(rows, ["raw"], "S4", sn, [], total, notes)
+    out = _wrap(rows, ["raw"], "S4", sn, [], total, notes, starts=where)
     out.specs = [FieldSpec(name="raw", kind="line", index=0)]
+    _attach_traces(rows, out.specs)
     return out
 
 

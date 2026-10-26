@@ -793,7 +793,7 @@ def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
         return client
 
     try:
-        if start_page > 1 and card.channel == "browser":
+        if card.channel == "browser" and (start_page > 1 or card.paging_url_template):
             # Resuming is only real if the tab is actually moved back. Without
             # this, `start_page=4` means "copy whatever is on screen and call it
             # page 4" -- conserved, deduped, and from the wrong part of the list.
@@ -865,7 +865,12 @@ def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
             # re-sorted items can hand back a page with 0 new rows while more
             # records genuinely remain, so "no new rows" must never outrank
             # "the next-page control is gone" or a content repeat.
-            if not _advance(card, client, allow_force):
+            if card.channel == "browser" and card.paging_url_template:
+                target_url = restore_to(ensure_client(), card, page + 1)
+                advanced = True
+            else:
+                advanced = _advance(card, client, allow_force)
+            if not advanced:
                 out.stopped_because = _no_advance_reason(card)
                 break
             if use_empty_stop and empty_streak >= empty_limit:

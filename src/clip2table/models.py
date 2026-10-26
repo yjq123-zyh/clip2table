@@ -132,6 +132,17 @@ class Row:
     values: dict[str, Any]
     raw_lines: list[str] = field(default_factory=list)
     source_page: int | None = None
+    # Index of this record's first line in the source text, so a preview can
+    # point at 原文 instead of asking the reader to count records. None means
+    # "the segmenter did not record it", which is different from 0.
+    source_line: int | None = None
+    # One source index per entry in `raw_lines`, same order. `source_line` alone
+    # is only enough when a record's lines are contiguous, and they are not: a
+    # record with a blank line in the middle drops that line, so every later
+    # offset points one or more lines too early. Measured symptom: a value that
+    # sits on source line 3 was reported as line 2, and line 3 was shown as
+    # unclaimed. Empty means "not recorded", never "starts at 0".
+    raw_at: list[int] = field(default_factory=list)
     # Not part of equality: two rows are the same record whether or not the
     # caller kept the audit trail.
     traces: dict[str, FieldTrace] = field(default_factory=dict, compare=False)

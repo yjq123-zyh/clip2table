@@ -1,0 +1,38 @@
+schema = 1
+name   = 'order-ledger'
+channel = "desktop"
+
+[task]
+title   = '订单台账'
+purpose = '把后台订单列表整理成一张能按订单号核对、能一直往下接的台账'
+source  = '订单管理后台 → 订单列表（登录后按页显示，每页 20 单）'
+created = '2026-10-25'
+expected = '每单一行，订单号唯一；金额保持页面原文（含 ¥ 与千分位），状态用页面上的中文原词'
+
+[segment]
+mode = "lines"
+skip_header = true
+
+[fields.'订单号']
+kind = "cell"
+col  = 0
+
+[fields.'客户']
+kind = "cell"
+col  = 1
+
+[fields.'金额']
+kind = "cell"
+col  = 2
+
+[fields.'状态']
+kind = "cell"
+col  = 3
+
+[fields.'下单时间']
+kind = "cell"
+col  = 4
+
+[dedupe]
+key = ['订单号']
+on_collision = "report_only"

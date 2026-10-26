@@ -10,13 +10,19 @@ include SKILL.md
 include CHANGELOG.md
 include pyproject.toml
 
-# 单测直接读 fixtures/，缺了它 472 项里有一批跑不起来
+# 单测直接读 fixtures/，缺了它 519 项里有一批跑不起来
 recursive-include fixtures *
 recursive-include tests *
+
+# 场景包既是文档里指向的东西，也是 tests/test_scene.py 的输入；
+# 漏了它，sdist 里会有一整组测试红。
+recursive-include scenes *
+global-exclude *.pyc *.pyo
 
 # selftest 要拿这几份文档跟真实参数表对账；装好的 wheel 没有它们（那时它会报错），
 # sdist 里有，所以从 sdist 跑 selftest 是绿的、从 wheel 跑是非 0 的，两者都对
 recursive-include docs *.md
+exclude docs/history/clip2table-design-review-v1.md
 
 # 不装包也能跑的子命令启动器，CI 和文档都用它
 include _dev/c2t.py

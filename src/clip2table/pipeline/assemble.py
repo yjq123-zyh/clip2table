@@ -35,9 +35,18 @@ def assemble(seg: Segmented, specs: list[FieldSpec],
     empty_lines = 0
     unparsed = list(seg.unparsed)
 
-    for rec in seg.records:
+    for i, rec in enumerate(seg.records):
         row = extract(rec, specs)
         row.source_page = opts.page
+        # Carry the record's own offset so the preview can point at 原文. The
+        # list is allowed to be short (a segmenter that did not track starts);
+        # then this stays None, which the preview renders as "未记录".
+        if i < len(seg.record_starts):
+            row.source_line = seg.record_starts[i]
+        # The whole line-by-line mapping, so a value on a line after a blank
+        # one lands on the right source line instead of one short.
+        if i < len(seg.record_lines):
+            row.raw_at = list(seg.record_lines[i])
         if opts.drop_empty and not any(_nonempty(v) for v in row.values.values()):
             empty_records += 1
             empty_lines += len(rec)
