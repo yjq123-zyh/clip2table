@@ -69,6 +69,9 @@ git push origin main --tags
 
 ## 出问题怎么看
 
+`python _dev/check_release_workflow.py` 检查工作流结构，并使用 `pyproject.toml` 的当前版本
+验证匹配标签、错误标签和手动触发三条路径。运行需要 PyYAML 和 PowerShell 7。
+
 | 报错 | 原因 |
 |---|---|
 | `invalid-publisher` / 403 | PyPI 上的字段与 `release.yml` 不一致；或 environment 名字不是 `pypi` |

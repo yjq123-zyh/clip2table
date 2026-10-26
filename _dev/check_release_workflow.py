@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -158,20 +159,23 @@ def main() -> int:
             )
 
         # 4a. 正常路径：标签与版本一致
-        r = run("push", "v0.1.0")
-        print("\n[正常路径 push v0.1.0] exit=", r.returncode)
+        version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+        expected_tag = f"v{version}"
+        r = run("push", expected_tag)
+        print(f"\n[正常路径 push {expected_tag}] exit=", r.returncode)
         if r.returncode != 0:
             print("stdout:", (r.stdout or "").strip()[:800])
             print("stderr:", (r.stderr or "").strip()[:800])
             raise SystemExit("版本门在正常路径下失败了")
         got = outputs()
         print("GITHUB_OUTPUT:", got)
-        if got.get("tag") != "v0.1.0":
+        if got.get("tag") != expected_tag or got.get("version") != version:
             raise SystemExit(f"tag 输出不对: {got}")
 
         # 4b. 反向验证：标签与版本不一致时必须失败
-        r2 = run("push", "v9.9.9")
-        print("[反向 push v9.9.9] exit=", r2.returncode)
+        mismatched_tag = expected_tag + "-mismatch"
+        r2 = run("push", mismatched_tag)
+        print(f"[反向 push {mismatched_tag}] exit=", r2.returncode)
         if r2.returncode == 0:
             raise SystemExit("标签与版本不一致却通过了——这道门是假的")
 

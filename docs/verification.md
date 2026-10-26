@@ -298,3 +298,6 @@ python -m unittest discover -s tests -t .
 
 订单场景的 HTTP 请求使用实际本地服务；浏览器翻页测试使用模拟客户端。测试均使用临时任务副本和数据目录。
 详细操作见 [订单台账示例](../scenes/order-ledger/README.md)。
+
+发布检查：`python _dev/check_release_workflow.py` 读取当前版本 v0.2.0，匹配标签退出 0、
+错误标签退出 1、手动触发退出 0。GitHub Release 与 PyPI 发布成功。
