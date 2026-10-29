@@ -56,13 +56,16 @@ token 是长期有效的密钥，要存、要轮换、泄露了能改包；OIDC 
 #    CHANGELOG.md 加一节
 
 # 2. 写发版说明（release.yml 找不到这个文件会直接失败）
-$EDITOR docs/releases/v0.1.1.md
+$EDITOR docs/releases/v0.3.0.md
 
 # 3. 提交，打标签，推
-git commit -am "Release v0.1.1"
-git tag v0.1.1
-git push origin main --tags
+git add src tests scenes docs README.md SKILL.md CHANGELOG.md pyproject.toml
+git commit -m "Release v0.3.0"
+git tag v0.3.0
+git push --atomic origin main v0.3.0
 ```
+
+提交应包含新增模块、测试和场景文件。推送前核对暂存清单与安装包内容；本地计划和运行产物保持在发布清单之外。
 
 推标签触发 workflow。也可以去 **Actions → release → Run workflow** 手动触发一次
 （读的是当前分支的代码，不校验标签，适合修复一次失败的发布）。

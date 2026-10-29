@@ -16,7 +16,8 @@ from ..pipeline.extract import KINDS, TYPES, FieldSpec
 CHANNELS = ("http", "browser", "desktop")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 TOP_KEYS = {"schema", "name", "channel", "harvest", "target", "fetch",
-            "segment", "fields", "paging", "dedupe", "samples", "task"}
+            "segment", "fields", "paging", "dedupe", "samples", "task",
+            "ledger"}
 SEGMENT_MODES = ("anchor", "blank", "single", "lines", "periodic")
 # What a task says about itself. Kept inside the card file on purpose: a task
 # that lives somewhere else drifts from the rules it claims to run, and the
@@ -25,6 +26,12 @@ SEGMENT_MODES = ("anchor", "blank", "single", "lines", "periodic")
 # a hand-edited file.
 TASK_KEYS = {"title", "purpose", "source", "sample", "created", "expected",
              "notes"}
+# How a task says which observation of an entity is the newest. This belongs in
+# the card, not in a command flag: it is a fact about the business ("the state
+# with the latest 更新时间 wins"), and two people reading the same dataset with
+# different sort rules would produce two current tables, both defensible.
+LEDGER_KEYS = {"sort", "field", "timezone", "key_types"}
+LEDGER_SORTS = ("business_time", "business_version", "observed")
 
 
 @dataclass
@@ -81,11 +88,26 @@ class Card:
     # without it runs exactly as before -- which is what lets this arrive
     # without a schema bump.
     task: dict[str, Any] = field(default_factory=dict)
+    # `[ledger]`: how to read this task's rows as a ledger over time. Optional
+    # and display-only for every existing path (nothing in the v1 pipeline reads
+    # it), so old cards load unchanged.
+    ledger: dict[str, Any] = field(default_factory=dict)
     path: str = ""
 
     @property
     def field_names(self) -> list[str]:
         return [f.name for f in self.fields]
+
+    @property
+    def ledger_sort(self) -> str:
+        """Declared sort rule, defaulting to `observed` (the honest fallback)."""
+        s = self.ledger.get("sort")
+        return str(s) if isinstance(s, str) and s in LEDGER_SORTS else "observed"
+
+    @property
+    def ledger_sort_field(self) -> str:
+        f = self.ledger.get("field")
+        return str(f) if isinstance(f, str) else ""
 
     @property
     def title(self) -> str:
@@ -311,7 +333,73 @@ def parse_card(data: dict[str, Any], path: str = "") -> Card:
         samples=samples, path=path,
         record_lines=record_lines, required=list(required),
         task=_task(data.get("task"), path),
+        # Field names, not the dedupe key: a sort field has to be a column the
+        # task produces, and the dedupe key is only the subset that identifies a
+        # record. Passing the key here made every legitimate `field` look
+        # undeclared.
+        ledger=_ledger(data.get("ledger"), path, [s.name for s in specs]),
     )
+
+
+def _ledger(raw: Any, path: str, keys: list[str]) -> dict[str, Any]:
+    """`[ledger]`: how to read these rows as a ledger over time.
+
+    Validated because a wrong sort field silently produces a plausible current
+    table built on a column that means nothing -- the failure mode is not an
+    error, it is a ledger that looks right and says last month is today.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise InputError(f"{path}: [ledger] 必须是一张表",
+                         hint='写法是 [ledger] 换行 sort = "business_time"')
+    unknown = set(raw) - LEDGER_KEYS
+    if unknown:
+        raise InputError(f"{path}: [ledger] 里不认识的键 {sorted(unknown)}",
+                         hint=f"允许的是 {sorted(LEDGER_KEYS)}")
+    out: dict[str, Any] = {}
+    sort = raw.get("sort", "observed")
+    if not isinstance(sort, str) or sort not in LEDGER_SORTS:
+        raise InputError(
+            f"{path}: [ledger].sort 必须是 {list(LEDGER_SORTS)} 之一，实际是 {sort!r}")
+    out["sort"] = sort
+    field_name = raw.get("field", "")
+    if not isinstance(field_name, str):
+        raise InputError(f"{path}: [ledger].field 必须是字符串")
+    if sort != "observed":
+        if not field_name:
+            raise InputError(
+                f"{path}: [ledger].sort = {sort!r} 时必须给 field",
+                hint='比如 sort = "business_time" 配 field = "更新时间"')
+        known = set()
+        for part in field_name.split("+"):
+            known.add(part.strip())
+        declared = set(keys)
+        # The sort field is read from the parsed rows, so it has to be a field
+        # the task actually produces. A typo here would sort on empty strings
+        # and every entity would look unchanged.
+        missing = sorted(k for k in known if k and k not in declared)
+        if missing and declared:
+            raise InputError(
+                f"{path}: [ledger].field 用了没有声明的字段 {missing}",
+                hint=f"这张卡产出的字段是 {sorted(declared)}")
+    if field_name:
+        out["field"] = field_name
+    tz = raw.get("timezone", "Asia/Shanghai")
+    if not isinstance(tz, str) or not tz.strip():
+        raise InputError(f"{path}: [ledger].timezone 必须是非空字符串")
+    out["timezone"] = tz
+    kt_raw = raw.get("key_types", {})
+    if not isinstance(kt_raw, dict):
+        raise InputError(f"{path}: [ledger].key_types 必须是一张表",
+                         hint='写法是 key_types = { 订单号 = "text" }')
+    for k, v in kt_raw.items():
+        if v not in ("text", "int", "float", "date"):
+            raise InputError(
+                f"{path}: [ledger].key_types.{k} 必须是 text/int/float/date，实际是 {v!r}")
+    if kt_raw:
+        out["key_types"] = dict(kt_raw)
+    return out
 
 
 def _task(raw: Any, path: str) -> dict[str, Any]:

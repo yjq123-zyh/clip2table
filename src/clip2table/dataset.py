@@ -371,10 +371,12 @@ class Dataset:
         return self.path / RAW
 
     def exists(self) -> bool:
-        return (self.path / ROWS).is_file() or (self.path / STATE).is_file()
+        return (self.path / ROWS).is_file() or (self.path / STATE).is_file() or (self.path / "dataset.json").is_file()
 
     def open(self) -> "Dataset":
         """Load committed pages. Falls back to rows.csv for pre-page-commit dirs."""
+        if (self.path / "dataset.json").is_file():
+            return self._open_v2()
         if (self.path / STATE).is_file():
             self.state = _load(self.path / STATE, {})
         if not self.fields:
@@ -410,6 +412,33 @@ class Dataset:
             # The view on disk is where these rows came from, so it is in step.
             self._rows_dirty = False
         self._reindex()
+        return self
+
+    def _open_v2(self):
+        """Compatibility view, derived exclusively from the selected v2 revision."""
+        from . import revisions, api
+        revisions.init(self.path)
+        rid = revisions.active(self.path).get("revision_id")
+        if not rid:
+            return self
+        rev = revisions.read_revision(self.path, rid)
+        self.rows = []
+        self.fields = []
+        for e in rev.entries:
+            _, res = revisions.read_parse(self.path, e["parse_id"])
+            self.fields = list(dict.fromkeys(self.fields + res.fields))
+        policy = api.default_policy(self.path, rid)
+        self.keys = list(policy.keys)
+        self.identity_fields, self.mutable_fields = list(policy.identity), list(policy.mutable)
+        if self.keys:
+            rows, _, _ = api.ledger_view(self.path, rid)
+            self.rows = [{f: r.get(f) for f in self.fields} for r in rows]
+        else:
+            self.rows = [dict(r.values) for e in rev.entries for r in revisions.read_parse(self.path, e["parse_id"])[1].rows]
+        self.state = {"pages_done": len(rev.entries), "fields": self.fields, "keys": self.keys,
+                      "revision": rid, "layout": 2}
+        self._reindex()
+        self._rows_dirty = False
         return self
 
     def _restore_from_pages(self, pages: list[int]) -> None:
@@ -461,6 +490,10 @@ class Dataset:
 
     def committed_pages(self) -> list[int]:
         """Page numbers that exist as complete, published directories."""
+        if (self.path / "dataset.json").is_file():
+            from . import revisions
+            rid = revisions.active(self.path).get("revision_id")
+            return list(range(1, len(revisions.read_revision(self.path, rid).entries) + 1)) if rid else []
         d = self.pages_dir
         if not d.is_dir():
             return []
@@ -1251,6 +1284,13 @@ def _card_fingerprint(card) -> dict[str, Any]:
         "fetch": _jsonable(getattr(card, "fetch", {}) or {}),
         "target": _jsonable(getattr(card, "target", {}) or {}),
         "fields": _field_specs(card),
+        # `[ledger]` decides which observation counts as current, so it changes
+        # the RESULT of a re-read just as much as a field rule does. Leaving it
+        # out made a rule snapshot reload with the default `observed` ordering,
+        # and the same revision then produced a different "current" table
+        # depending on whether the caller passed a card or let the snapshot
+        # speak -- i.e. the CLI and the API disagreed.
+        "ledger": _jsonable(getattr(card, "ledger", {}) or {}),
     }
 
 
@@ -1268,7 +1308,8 @@ def describe_card_drift(old: dict[str, Any],
 
     for section, label in (("segment", "切分"), ("dedupe", "去重"),
                            ("paging", "翻页"), ("harvest", "采集"),
-                           ("fetch", "取数"), ("target", "目标")):
+                           ("fetch", "取数"), ("target", "目标"),
+                           ("ledger", "台账")):
         a, b = old.get(section), new.get(section)
         if not isinstance(a, dict) or not isinstance(b, dict):
             if a != b:

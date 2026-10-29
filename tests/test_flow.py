@@ -60,7 +60,7 @@ class TestRunIntoDataset(unittest.TestCase):
                                      "--text-file", str(ECOM), "-d", str(target))
             self.assertEqual(code, 0, err)
             self.assertTrue(target.is_dir(), "run -d 没有建目录")
-            self.assertTrue((target / "pages").is_dir())
+            self.assertTrue((target / "captures").is_dir())
             self.assertIn("提交进 dataset 3 行", out)
 
     def test_run_without_a_card_is_refused_before_writing(self):
@@ -72,16 +72,15 @@ class TestRunIntoDataset(unittest.TestCase):
             self.assertIn("需要同时给 -p 一张卡", err)
             self.assertFalse(target.exists(), "拒绝之后仍然建了目录")
 
-    def test_same_text_twice_does_not_publish_two_pages(self):
+    def test_same_request_twice_does_not_publish_two_observations(self):
         with tempfile.TemporaryDirectory() as d:
             target = Path(d) / "ds"
             args = ("run", "-p", "generic-item-block", "--text-file", str(ECOM),
-                    "-d", str(target))
+                    "-d", str(target), "--request-id", "same")
             self.assertEqual(run_cli(*args)[0], 0)
             code, _, err = run_cli(*args)
-            self.assertEqual(code, 2, "第二次提交同样的原文应当被拒绝")
-            self.assertIn("已经作为第 1 页提交过了", err)
-            self.assertEqual(len(list((target / "pages").iterdir())), 1)
+            self.assertEqual(code, 0, err)
+            self.assertEqual(len(list((target / "captures").iterdir())), 1)
 
     def test_report_separates_this_run_from_the_directory(self):
         with tempfile.TemporaryDirectory() as d:

@@ -8,7 +8,7 @@ clip2table 是一个面向 Windows 的文本转表格工具。它从网页、桌
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](#环境要求)
 
-可用于整理后台订单、公告列表、招聘信息、商品评价和本地台账。重复采集时，可以用 TOML 卡片保存字段规则和翻页方式，并将结果累积到同一个数据集。
+可用于整理后台订单、公告列表、招聘信息、商品评价和本地台账。重复采集时，可以用 TOML 卡片保存字段规则和翻页方式，并将结果累积到同一个数据集。同一批业务数据被观察多次时，可以按业务时间判断哪一次算当前状态，并导出变化与待处理。
 
 ## 功能
 
@@ -17,6 +17,10 @@ clip2table 是一个面向 Windows 的文本转表格工具。它从网页、桌
 - **预览纠错**：定位字段来源、选择并保存分段、修正规则、确认样本，记录配置耗时与运行情况。
 - **规则卡片**：用 TOML 配置采集通道、记录边界、字段提取、去重和翻页。
 - **批量采集**：支持分页、数据累积和按通道恢复采集位置。
+- **规则重放**：改规则后用保存的原文重新解析，不重新采集；差异定位到原文行，确认后再切换。
+- **台账视图**：按任务声明的业务时间取当前值，导出当前状态、变化、历史与待处理；旧版本晚到不覆盖新的，缺席不当作删除。
+- **程序接口**：`clip2table.api` 提供版本化请求与结构化结果，状态与需要用户处理的步骤可被程序识别。
+- **运行恢复**：保存原运行配置和已提交进度；通过请求标识重试，或继续原运行并回答待处理动作。
 - **数据记录**：保存原文、字段来源、解析状态、重复记录和内容冲突。
 - **格式导出**：输出 CSV、XLSX、JSONL 和 Markdown，超长内容保存到配套文件。
 
@@ -43,11 +47,13 @@ clip2table 是一个面向 Windows 的文本转表格工具。它从网页、桌
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/yjq123-zyh/clip2table/releases/latest) 下载 Python 安装包，或直接安装 `v0.2.0`：
+从 [GitHub Releases](https://github.com/yjq123-zyh/clip2table/releases/latest) 下载 Python 安装包，或直接安装 `v0.3.0`：
 
 ```powershell
-python -m pip install https://github.com/yjq123-zyh/clip2table/releases/download/v0.2.0/clip2table-0.2.0-py3-none-any.whl
+python -m pip install --upgrade clip2table==0.3.0
 ```
+
+也可以下载 [v0.3.0 wheel](https://github.com/yjq123-zyh/clip2table/releases/download/v0.3.0/clip2table-0.3.0-py3-none-any.whl)。
 
 从源码安装：
 
@@ -99,9 +105,39 @@ clip2table task run -p mysite.toml -d out/orders --max-pages 20 --yes
 clip2table export -d out/orders -f csv -f xlsx --dir out
 ```
 
+重复请求可指定 `--request-id orders-20261028`；中断后使用返回的运行标识继续：
+
+```powershell
+clip2table task run -d out/orders --resume run-xxxx --request-id orders-continue --json
+```
+
+新一次采集追加独立观察，历史保留每次来源；恢复使用原配置。动作回答和 Python 用法见[结果版本、持续台账与恢复](docs/usage.md#10-结果版本持续台账与恢复)。
+
 `task show mysite.toml` 会告诉你这个任务跑过几次、首次耗时多少、改过几次规则、
 其中几次重跑不用再改。完整参数和操作步骤见 [使用说明](docs/usage.md)；
 一个从头到尾走通的例子在 [scenes/order-ledger](scenes/order-ledger/)。
+
+### 规则改了、数据又观察了一次
+
+规则写错不用重新抓页面——用存下来的原文重读：
+
+```powershell
+clip2table replay -d out/orders -p edited.toml --show 10   # 用改过的规则重算，看差异
+clip2table replay -d out/orders -p edited.toml --select    # 确认无误，切成当前台账
+```
+
+同一批订单被观察第二次时，按任务声明的业务时间判断哪一次算当前状态：
+
+```powershell
+clip2table rev list -d out/orders                                    # 这个目录有哪些结果版本
+clip2table ledger -d out/orders --view current                       # 当前台账
+clip2table ledger -d out/orders --view changes --baseline v-xxxx     # 相对某版变了什么
+clip2table ledger -d out/orders --view pending                       # 需要人判断的
+clip2table ledger -d out/orders --view current -f xlsx -o out/now.xlsx
+```
+
+`[ledger] sort = "business_time"` 时，三天前才被读到的旧通知仍算旧——**旧版本晚到不会覆盖新的**。
+两次观察范围不一样时，没被重新观察到的订单按原样保留，**缺席不当作删除**。
 
 **已经有卡**，也可以直接走底层命令：
 

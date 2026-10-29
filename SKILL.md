@@ -199,6 +199,45 @@ clip2table task run -p <卡> -d out/x # 再跑一次
 
 ---
 
+## 数据不是抓到就完了：会被观察第二次
+
+新布局的执行、恢复、重算、选择和导出共用 `clip2table.api`。每次独立采集创建新 run；
+页号在 run 内定位，历史按捕获身份累积。同请求重试复用 request_id，继续未完成操作使用新的
+request_id 关联原 operation_id 和 checkpoint。
+
+```powershell
+clip2table task run -p orders.toml -d out/orders --request-id orders-morning --yes --json
+clip2table task run -d out/orders --resume run-xxxx --request-id orders-continue --json
+```
+
+需要动作时先向用户展示候选或来源操作，完成后以 `--answer answer.json` 提交 checkpoint 和
+action_response。程序可用 `api.operation_status` 获取最新检查点；恢复使用运行中冻结的配置。
+人工处理冲突使用 `api.resolve` 创建动作，再通过 `api.resume` 选择候选或保持待处理。
+
+同一条业务记录被观察第二次，有四件事容易混成一件。分清楚，才不会把「重新读一遍」
+说成「又抓了一次」：
+
+| 你要的 | 用这个 | 会不会去取新数据 |
+|---|---|---|
+| 抓新数据（可能翻页）| `clip2table task run -p <卡> -d <目录>`（不带 `--text-file`）| 会 |
+| 用改过的规则重读已存的原文 | `clip2table replay -d <目录> -p <改过的卡>` | **不会** |
+| 看变了什么 | `clip2table ledger -d <目录> --view changes --baseline <版本>` | 不会 |
+| 只把某个视图导成文件 | `clip2table ledger -d <目录> -f xlsx -o <文件>` | 不会 |
+
+`replay` 出来的只是**候选**版本，不会自动生效。确认差异无误再
+`clip2table replay … --select`。
+
+三个必须记住的边界：
+
+1. **旧版本晚到不许覆盖新的**。任务声明了按业务时间排序（卡里 `[ledger] sort = "business_time"`），
+   一条三天前的通知今天才读到，它的业务时间还是三天前，不能变成当前状态。
+2. **没再观察到的记录不当作删除**。两次采集覆盖的页面范围不一样时，报告会写
+   「没被这次观察到的实体按原样保留」。删除是显式动作，缺席不是。
+3. **冲突保留已接受的当前值和候选**。业务时间相同但内容不同、身份变化、未声明可变字段变化、
+   排序值无效及主键不完整时进入 pending。选择已有候选后保存决定，重载视图仍可追溯。
+
+---
+
 ## 未识别不是垃圾桶
 
 没被任何记录认领的行会全部保留在未识别清单里，并在报告里计数；导出时落一份同名
@@ -234,18 +273,12 @@ required     = ["title"]     # 必须有值的字段
 
 ## 累积采集
 
-一次性导出用 `-o`。要跨批次累积（今天采 3 页、明天接着采）用 `-d <目录>`：
-它自己维护已采状态、跨批次去重、把冲突记在审计文件里，重跑不会产生重复行。
-不要用"再跑一遍然后手工去重"代替它——手工去重会把"两个用户发了同样的内容"当成重复删掉。
+新数据集的原文、解析和版本清单构成数据依据；重复观察保留在 history，current 按业务策略归并。
+`counts.pages/rows` 为原运行已提交总量，`this_request_pages/rows` 为本次调用的新增提交，
+`dataset_rows` 为当前台账规模。使用明确的 baseline 查看变化。
 
-**续采位置按通道分别定义**：`http` 记页号就够；`browser` 记实际落到的地址；
-`desktop` 没有可恢复的界面位置（地址读不到、滚动位置还原不了），所以必须显式
-`--append-from-here` 声明"接着当前屏幕继续"，新的一段以单独段号接在后面。
-**不要自己编页号**——那会把第 1 页重新采一遍当成第 4 页写进磁盘。
-
-冲突分两种，都落进 dataset 的 `conflicts.json`：**内容变更**（同一条记录换了内容，
-保留最新、旧值留档）与**身份冲突**（主键不足以区分两个东西，两份都留）。
-第二种说明主键规则不够用，该去改 `[dedupe]`，不要靠人工合并。
+HTTP 页码和浏览器 URL 模板可以恢复；桌面与纯点击翻页需用户确认下一来源位置。
+旧 pages/state 数据集继续走原读取与续采路径；采用到新布局时用独立目标目录和明确的捕获类型。
 
 ---
 

@@ -1,4 +1,4 @@
-"""Serve the two order samples as local HTML pages for the collection example."""
+"""Serve the order samples as local HTML pages for the collection example."""
 from __future__ import annotations
 
 import argparse
@@ -15,7 +15,7 @@ class OrderHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlsplit(self.path)
         page = parse_qs(url.query).get("page", ["1"])[0]
-        if url.path != "/orders" or page not in ("1", "2"):
+        if url.path != "/orders" or page not in ("1", "2", "3"):
             self.send_error(404)
             return
         with (ROOT / "input" / f"page-{page}.txt").open(encoding="utf-8") as source:
@@ -24,7 +24,9 @@ class OrderHandler(BaseHTTPRequestHandler):
         for i, row in enumerate(rows):
             tag = "th" if i == 0 else "td"
             table.append("<tr>" + "".join(f"<{tag}>{html.escape(v)}</{tag}>" for v in row) + "</tr>")
-        next_link = '<a rel="next" href="/orders?page=2">下一页</a>' if page == "1" else ""
+        next_page = str(int(page) + 1)
+        next_link = (f'<a rel="next" href="/orders?page={next_page}">下一页</a>'
+                     if next_page in ("2", "3") else "")
         body = ('<!doctype html><meta charset="utf-8"><title>订单台账</title>'
                 + '<table id="orders">' + "".join(table) + "</table>" + next_link).encode("utf-8")
         self.send_response(200)

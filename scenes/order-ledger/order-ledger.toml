@@ -7,7 +7,7 @@ title   = '订单台账'
 purpose = '把后台订单列表整理成一张能按订单号核对、能一直往下接的台账'
 source  = '订单管理后台 → 订单列表（登录后按页显示，每页 20 单）'
 created = '2026-10-25'
-expected = '每单一行，订单号唯一；金额保持页面原文（含 ¥ 与千分位），状态用页面上的中文原词'
+expected = '每单一行，订单号唯一；金额保持页面原文（含 ¥ 与千分位），状态用页面上的中文原词；更新时间是这一单最后一次变动的业务时间，不是我们抓它的时间'
 
 [segment]
 mode = "lines"
@@ -33,6 +33,19 @@ col  = 3
 kind = "cell"
 col  = 4
 
+[fields.'更新时间']
+kind = "cell"
+col  = 5
+
 [dedupe]
 key = ['订单号']
 on_collision = "report_only"
+# 这两列本来就会变：状态是业务变化，更新时间是业务时间戳本身。
+# 不写进这里的话，每次状态更新都会被报成「这个字段没声明会变，
+# 但两次观察不一样」，等于把正常的台账更新说成异常。
+mutable = ['状态', '更新时间']
+
+[ledger]
+sort = "business_time"
+field = '更新时间'
+timezone = "Asia/Shanghai"

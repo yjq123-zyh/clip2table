@@ -107,9 +107,16 @@ def pick_target(port: int, url_contains: str | None = None) -> dict:
     not something a tool should do on their behalf.
     """
     pages = usable_pages(port)
+    candidates = [{"id": t.get("id"), "title": t.get("title", ""), "url": t.get("url", "")} for t in pages]
+    if url_contains and url_contains.startswith("target-id:"):
+        selected = next((t for t in pages if t.get("id") == url_contains[len("target-id:"):]), None)
+        if selected is None:
+            raise ChannelError("选定的标签页已关闭", reason="target_confirmation", details={"candidates": candidates})
+        return selected
     if not pages:
         raise ChannelError(
             "浏览器开着了，但没有可用的页面标签",
+            reason="target_confirmation", details={"candidates": candidates},
             hint="在浏览器里打开要采集的页面，然后重试；"
                  "或者关掉浏览器用 doctor 给出的命令重新启动")
     if url_contains:
@@ -118,14 +125,19 @@ def pick_target(port: int, url_contains: str | None = None) -> dict:
             seen = "\n".join("    " + str(t.get("url", ""))[:90] for t in pages[:8])
             raise ChannelError(
                 f"没有 URL 含 {url_contains!r} 的标签页",
+                reason="target_confirmation", details={"candidates": candidates},
                 hint=f"现在开着的是：\n{seen}")
-        return hits[0]
+        if len(hits) == 1:
+            return hits[0]
+        pages = hits
+        candidates = [c for c in candidates if c["id"] in {t.get("id") for t in hits}]
     if len(pages) > 1:
         seen = "\n".join(
             f"    [{i}] {t.get('title') or '(无标题)'}  —  {str(t.get('url'))[:80]}"
             for i, t in enumerate(pages[:10], 1))
         raise ChannelError(
             f"浏览器里有 {len(pages)} 个页面标签，没说清是哪个，我不猜",
+            reason="target_confirmation", details={"candidates": candidates},
             hint="在卡里写上要采哪一页，然后重跑：\n"
                  "    [harvest]\n"
                  '    url_contains = "想采的那个地址里的一小段"\n'

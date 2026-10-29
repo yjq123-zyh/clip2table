@@ -69,6 +69,7 @@ class MultiRound:
 
     rounds: list[Round] = field(default_factory=list)
     stopped_because: str = ""
+    stopped_code: str = ""
     pages_done: int = 0
     new_per_page: list[int] = field(default_factory=list)
     repeat_of: int | None = None     # page number this run repeated, if any
@@ -355,7 +356,8 @@ def _check_challenge(client: cdp_mod.CDP, notes: list[str]) -> None:
         f"这个页面是人机验证墙（{shown}），里面没有数据，所以一个键都没发",
         hint="请在那个浏览器窗口里手动完成验证（图形/滑块/点击），"
              "页面跳回正常内容后再跑一次。我不会自动重试——"
-             "重试只会让站点把验证升级得更狠")
+             "重试只会让站点把验证升级得更狠",
+        reason="verification_required")
 
 
 def _scroll(client, spec, notes: list[str]) -> None:
@@ -406,7 +408,8 @@ def harvest_desktop(card: Card, page: int = 1, allow_force: bool = False) -> Rou
     if how == "none":
         raise ChannelError(
             f"窗口 {title[:40]!r} 切不到前台，因此一个键都没发",
-            hint="关掉抢焦点的程序（输入法候选框、置顶小窗），再重试")
+            hint="关掉抢焦点的程序（输入法候选框、置顶小窗），再重试",
+            reason="target_confirmation")
 
     try:
         kb.require_foreground(hwnd)
@@ -463,7 +466,8 @@ def harvest_desktop(card: Card, page: int = 1, allow_force: bool = False) -> Rou
                 f"复制到的是浏览器自己的界面（{reason}），不是页面内容",
                 hint="程序化激活浏览器时页面拿不回键盘焦点，Ctrl+A 选中了地址栏。"
                      "把那个窗口点一下（让它真正在前台），或者带 --remote-debugging-port "
-                     "启动浏览器改用 browser 通道")
+                     "启动浏览器改用 browser 通道",
+                reason="target_confirmation")
 
         cap.channel = "desktop"
         cap.engine = "E2"
@@ -603,6 +607,8 @@ def _read_with_retry(need_html: bool = True, tries: int = 3) -> Captured:
 
 def _url_hint(card: Card) -> str | None:
     h = card.harvest or {}
+    if h.get("target_id"):
+        return "target-id:" + str(h["target_id"])
     return h.get("url_contains") or (card.fetch or {}).get("url_contains")
 
 
@@ -669,7 +675,8 @@ def restore_to(client: cdp_mod.CDP, card: Card, page: int,
     if not seen:
         raise ChannelError(
             f"导航到第 {page} 页（{want[:80]}）之后读不到地址栏",
-            hint="确认标签页还在、没有被关闭或跳走")
+            hint="确认标签页还在、没有被关闭或跳走",
+            reason="resume_position_confirmation")
     # Same page means same path+query; the fragment is not part of the address
     # of a page in a list, so a hash difference must not fail the check.
     want_key = urlsplit(want)
@@ -678,7 +685,8 @@ def restore_to(client: cdp_mod.CDP, card: Card, page: int,
             (got_key.scheme, got_key.netloc, got_key.path, got_key.query):
         raise ChannelError(
             f"想恢复到第 {page} 页，导航到了 {seen[:80]}，不是 {want[:80]}",
-            hint="站点可能重定向了；用 --append-from-here 明确从当前屏幕接着采")
+            hint="站点可能重定向了；用 --append-from-here 明确从当前屏幕接着采",
+            reason="resume_position_confirmation")
     notes.append(f"已导航到第 {page} 页：{want[:80]}")
     return seen
 
@@ -712,6 +720,9 @@ def harvest_http(card: Card, page: int = 1, timeout: float = 8.0) -> Round:
             hint='把 url 写成 "https://.../list?page={page}" 这样才翻得动')
 
     result = ch.fetch(url, timeout=timeout)
+    if result.status == 401:
+        raise ChannelError("来源返回 HTTP 401，需要登录", reason="login_required",
+                           code="authentication_required", details={"status": 401, "url": result.url})
     must_contain = str(fetch.get("contains") or "")
     must_match = str(fetch.get("matches") or "")
     if not ch.usable_for_card(result, must_contain, must_match):
@@ -722,6 +733,11 @@ def harvest_http(card: Card, page: int = 1, timeout: float = 8.0) -> Round:
         # stop, and it must not look like a failure of the run.
         if page > 1 and result.status in (404, 410):
             raise _EndOfList(f"第 {page} 页不存在（HTTP {result.status}）")
+        # No `reason` here on purpose. A 403 or an empty shell means the page
+        # we got is not the data -- it does not say *why*. Claiming
+        # "you must log in" from it would be a guess dressed as a status, and a
+        # program acting on that guess would send someone to the wrong screen.
+        # An unprovable wall is a `failed` operation with a hint, not a reason.
         raise ChannelError(
             f"直连没拿到可用内容：{result.reason or '返回的是空页或不是目标页'}",
             hint="这条站点要靠登录态或 JS 渲染，换 browser 通道"
@@ -746,7 +762,7 @@ def harvest_http(card: Card, page: int = 1, timeout: float = 8.0) -> Round:
 
 def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
                   allow_force: bool = False, start_page: int = 1,
-                  on_page=None) -> MultiRound:
+                  on_page=None, on_capture=None, positioned: bool = False) -> MultiRound:
     """Collect up to max_pages, stopping on any of four honest signals.
 
     "Reached max_pages" alone is a bad stop signal: it means the tool kept
@@ -793,7 +809,7 @@ def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
         return client
 
     try:
-        if card.channel == "browser" and (start_page > 1 or card.paging_url_template):
+        if card.channel == "browser" and not positioned and (start_page > 1 or card.paging_url_template):
             # Resuming is only real if the tab is actually moved back. Without
             # this, `start_page=4` means "copy whatever is on screen and call it
             # page 4" -- conserved, deduped, and from the wrong part of the list.
@@ -819,6 +835,7 @@ def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
                     rnd = harvest_http(card, page=page)
                 except _EndOfList as e:
                     out.stopped_because = f"列表到底了：{e}"
+                    out.stopped_code = "source_exhausted"
                     break
             else:
                 rnd = harvest_desktop(card, page=page, allow_force=allow_force)
@@ -836,8 +853,11 @@ def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
                     f"第 {page} 页和第 {first} 页内容完全相同（翻页没有真的前进），"
                     f"已停手，这一页没有写入")
                 out.repeat_of = first
+                out.stopped_code = "repeated_page"
                 break
             fingerprints[print_hash] = page
+            if on_capture is not None:
+                on_capture(rnd)
 
             # Parse right here, not at the caller: the stop conditions below are
             # expressed in ROWS, and counting rows is impossible without a
@@ -859,6 +879,7 @@ def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
 
             if len(out.rounds) >= max_pages:
                 out.stopped_because = f"达到 --max-pages {max_pages}"
+                out.stopped_code = "scope_limit_reached"
                 break
 
             # Explicit signals first, then the heuristic. A list with pinned or
@@ -872,8 +893,10 @@ def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
                 advanced = _advance(card, client, allow_force)
             if not advanced:
                 out.stopped_because = _no_advance_reason(card)
+                out.stopped_code = "source_exhausted"
                 break
             if use_empty_stop and empty_streak >= empty_limit:
+                out.stopped_code = "empty_page_limit"
                 out.stopped_because = (
                     f"连续 {empty_streak} 页没有新增行，判定已到底"
                     f"（[paging].stop_when=\"{card.stop_when}\"，"

@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clip2table"
-version = "0.2.0"
-description = "把屏幕上看得到、选得中的任何内容，变成一张结构化表"
+version = "0.3.0"
+description = "从网页和桌面应用采集可复制文本，按规则整理表格并持续更新业务台账"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE.md"]
 authors = [{ name = "kdy", email = "yangdurant978@gmail.com" }]
-keywords = ["clipboard", "scraping", "table", "windows", "cdp", "csv", "xlsx"]
+keywords = ["clipboard", "table", "windows", "cdp", "csv", "xlsx", "data-extraction", "ledger"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Environment :: Win32 (MS Windows)",

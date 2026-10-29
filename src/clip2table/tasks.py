@@ -84,7 +84,7 @@ def save(path: str | Path, data: dict[str, Any]) -> bool:
 
 def record_run(path: str | Path, *, rows: int, pages: int, ok: bool,
                seconds: float | None = None, channel: str = "",
-               note: str = "") -> dict[str, Any]:
+               note: str = "", run_id: str = "", request_id: str = "") -> dict[str, Any]:
     """Append one run. Returns the summary that gets printed after it.
 
     `seconds` is how long *this* run took, and it is kept for every run: later
@@ -94,6 +94,11 @@ def record_run(path: str | Path, *, rows: int, pages: int, ok: bool,
     until the user says the output is right -- `record_confirm` records that.
     """
     data = load(path)
+    previous = next((r for r in data["runs"] if run_id and r.get("run_id") == run_id), None)
+    if previous and request_id in previous.get("requests", []):
+        summary = summarise(data)
+        summary["recorded"] = True
+        return summary
     entry = {"at": _now(), "rows": int(rows), "pages": int(pages),
              "ok": bool(ok), "channel": channel,
              # How many fixes existed when this run started. Comparing this
@@ -105,7 +110,17 @@ def record_run(path: str | Path, *, rows: int, pages: int, ok: bool,
         entry["seconds"] = round(float(seconds), 2)
     if note:
         entry["note"] = note
-    data["runs"].append(entry)
+    if run_id:
+        entry.update(run_id=run_id, requests=list((previous or {}).get("requests", [])) + ([request_id] if request_id else []))
+    if previous:
+        if not note:
+            previous.pop("note", None)
+        entry["at"] = previous["at"]
+        entry["fixes"] = previous["fixes"]
+        entry["seconds"] = round(float(previous.get("seconds", 0)) + float(seconds or 0), 2)
+        previous.update(entry)
+    else:
+        data["runs"].append(entry)
     summary = summarise(data)
     summary["recorded"] = save(path, data)
     return summary

@@ -13,10 +13,14 @@ falsifiable, and this file falsifies them on every run.
 from __future__ import annotations
 
 import contextlib
+import csv
 import io
 import json
 import os
+import re
 import runpy
+import subprocess
+import sys
 import threading
 import tempfile
 import unittest
@@ -27,7 +31,7 @@ from clip2table.cards.loader import load_card
 from clip2table.cli import main
 from clip2table.core import parse_capture
 from clip2table.models import Captured
-from clip2table import tasks
+from clip2table import revisions, tasks
 
 SCENE = Path(__file__).resolve().parent.parent / "scenes" / "order-ledger"
 CARD = SCENE / "order-ledger.toml"
@@ -49,9 +53,24 @@ def run_cli(*argv: str) -> tuple[int, str, str]:
 
 
 class TestThePackageIsComplete(unittest.TestCase):
+    def test_the_answer_file_matches_a_fresh_run(self):
+        """The shipped answers are what the tool produces today.
+
+        `make-answers.py` is the independent implementation (it does not import
+        clip2table), so this pins the answers to the samples: if a sample page
+        is edited and the answers are not regenerated, this fails here rather
+        than showing up as a mysterious mismatch three tests later.
+        """
+        proc = subprocess.run(
+            [sys.executable, str(SCENE / "make-answers.py"), "--check"],
+            capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(proc.returncode, 0,
+                         f"答案文件与输入对不上：{proc.stdout}{proc.stderr}")
+
     def test_every_piece_s1_06_asks_for_is_on_disk(self):
         """目标字段、输入样本、独立答案、任务配置、输出样本、操作示例."""
-        for p in (CARD, PAGE1, PAGE2, EXPECTED, SCENE / "README.md"):
+        for p in (CARD, PAGE1, PAGE2, EXPECTED, SCENE / "README.md",
+                  SCENE / "make-answers.py"):
             self.assertTrue(p.is_file(), f"场景包缺文件：{p}")
 
     def test_the_card_declares_its_own_purpose(self):
@@ -60,8 +79,18 @@ class TestThePackageIsComplete(unittest.TestCase):
         self.assertTrue(card.task.get("source"), "卡里没写数据来源")
         self.assertTrue(card.task.get("expected"), "卡里没写一条正确记录长什么样")
         self.assertEqual(card.field_names,
-                         ["订单号", "客户", "金额", "状态", "下单时间"])
+                         ["订单号", "客户", "金额", "状态", "下单时间", "更新时间"])
         self.assertEqual(card.dedupe_key, ["订单号"])
+        # `mutable` says which columns are expected to change between two
+        # observations of one order. Nothing in a single sample can prove that,
+        # so it is declared by hand -- and the ledger's A05/A06 handling depends
+        # on it, which is exactly why it belongs in the shipped card.
+        # 更新时间 is in it too: it is the business timestamp itself, so every
+        # status change carries a new one, and leaving it out reported each
+        # normal update as "这些字段没被声明会变".
+        self.assertEqual(card.mutable_fields, ["状态", "更新时间"])
+        self.assertEqual(card.ledger_sort, "business_time")
+        self.assertEqual(card.ledger_sort_field, "更新时间")
 
     def test_the_samples_have_a_header_and_a_thousand_separator(self):
         self.assertIn("订单号\t客户", PAGE1.read_text(encoding="utf-8"))
@@ -204,7 +233,7 @@ class TestTheWholePath(unittest.TestCase):
         from clip2table.errors import ChannelError
         with tempfile.TemporaryDirectory() as d:
             card = self._card_copy(d)
-            with patch("clip2table.cli.cmd_harvest", side_effect=ChannelError("目标窗口不存在")):
+            with patch("clip2table.harvest.harvest_pages", side_effect=ChannelError("目标窗口不存在")):
                 code, out, err = run_cli("task", "run", "-p", str(card), "-d", str(Path(d) / "out"))
             self.assertNotEqual(code, 0)
             runs = tasks.load(tasks.stats_path(card))["runs"]
@@ -241,17 +270,18 @@ class TestTheWholePath(unittest.TestCase):
             self.assertEqual(got.read_bytes(), EXPECTED.read_bytes(),
                              "导出结果与独立答案不一致")
 
-    def test_a_page_committed_twice_is_refused_and_does_not_grow_the_table(self):
+    def test_a_request_retried_does_not_grow_the_table(self):
         with tempfile.TemporaryDirectory() as d:
             card = self._card_copy(d)
             ds = Path(d) / "orders"
             code, _, _ = run_cli("task", "run", "-p", str(card),
-                                 "--text-file", str(PAGE1), "-d", str(ds))
+                                 "--text-file", str(PAGE1), "-d", str(ds), "--request-id", "page-one")
             self.assertEqual(code, 0)
             code, out, err = run_cli("task", "run", "-p", str(card),
-                                     "--text-file", str(PAGE1), "-d", str(ds))
-            self.assertNotEqual(code, 0, "同一页重复提交必须非零退出")
-            self.assertIn("已经作为第 1 页提交过", out + err)
+                                     "--text-file", str(PAGE1), "-d", str(ds), "--request-id", "page-one")
+            self.assertEqual(code, 0, out + err)
+            from clip2table import revisions
+            self.assertEqual(len(revisions.list_captures(ds)), 1)
 
     def test_the_task_remembers_that_it_ran_twice(self):
         with tempfile.TemporaryDirectory() as d:
@@ -288,7 +318,13 @@ class TestRunningTheTestsDoesNotDirtyTheRepository(unittest.TestCase):
 
 class TestTheWizardProducesTheSameCard(unittest.TestCase):
     def test_the_generated_card_matches_the_shipped_one_apart_from_the_prose(self):
-        """README 说差别只有 name 与 [task] 里那几行字，这里验它。"""
+        """What a sample cannot tell you is exactly what the shipped card adds.
+
+        README 说「向导产物与自己写的卡只差 name 和 [task] 那几行字」。这句话
+        需要一条限定：一条样本说不出「哪个字段会变」和「按哪个时间判断新旧」，
+        所以 `[dedupe].mutable` 与 `[ledger]` 是人写的。这里把那两处显式列出来
+        比对，其余逐键要求相同——差别一旦扩大，这条测试就会红。
+        """
         import tomllib
 
         with tempfile.TemporaryDirectory() as d:
@@ -301,8 +337,15 @@ class TestTheWizardProducesTheSameCard(unittest.TestCase):
 
             self.assertEqual(gen["segment"], ship["segment"])
             self.assertEqual(gen["fields"], ship["fields"])
-            self.assertEqual(gen["dedupe"], ship["dedupe"])
             self.assertEqual(gen["channel"], ship["channel"])
+            self.assertEqual(gen["dedupe"]["key"], ship["dedupe"]["key"])
+            self.assertEqual(gen["dedupe"]["on_collision"],
+                             ship["dedupe"]["on_collision"])
+            # Hand-written, and only these:
+            self.assertNotIn("mutable", gen["dedupe"])
+            self.assertEqual(ship["dedupe"]["mutable"], ["状态", "更新时间"])
+            self.assertNotIn("ledger", gen)
+            self.assertEqual(ship["ledger"]["sort"], "business_time")
 
     def test_the_generated_card_runs_without_editing_it(self):
         with tempfile.TemporaryDirectory() as d:
@@ -402,6 +445,197 @@ class TestFixDoesNotTouchTheFileUnlessAsked(unittest.TestCase):
                 "--text-file", str(PAGE2), "--write")
             self.assertNotEqual(code, 0, "混着两种换行的卡必须拒绝改写")
             self.assertIn("两种换行", out + err)
+
+
+class TestTheLedgerAnswersAreReproducible(unittest.TestCase):
+    """S2-08: three observations of the same ledger, checked against answers.
+
+    The answer files are produced by `scenes/order-ledger/make-answers.py`, which
+    reads the three sample pages and applies the three rules the card states in
+    words -- deliberately without importing clip2table. If the ledger and the
+    answers are ever the same code, "they agree" stops meaning anything.
+
+    Only business facts are compared. The tool also emits prose (`_pending` says
+    *why* a row is pending, naming an observation timestamp that changes every
+    run); the answer files keep the yes/no part and the test drops the rest.
+    """
+
+    def _collected(self, d: str) -> Path:
+        card = Path(d) / "orders.toml"
+        card.write_bytes(CARD.read_bytes())
+        ds = Path(d) / "ledger"
+        for page in (PAGE1, PAGE2, SCENE / "input" / "page-3.txt"):
+            code, out, err = run_cli("task", "run", "-p", str(card),
+                                     "--text-file", str(page), "-d", str(ds))
+            self.assertEqual(code, 0, out + err)
+        return ds
+
+    def _csv(self, *argv: str) -> list[list[str]]:
+        out_path = Path(self._tmp) / f"{len(list(Path(self._tmp).iterdir()))}.csv"
+        code, out, err = run_cli(*argv, "-f", "csv", "-o", str(out_path))
+        self.assertEqual(code, 0, out + err)
+        with out_path.open(encoding="utf-8-sig", newline="") as fh:
+            return list(csv.reader(fh))
+
+    @staticmethod
+    def _answer(name: str) -> list[list[str]]:
+        with (SCENE / "output" / name).open(encoding="utf-8-sig", newline="") as fh:
+            return list(csv.reader(fh))
+
+    def test_three_observations_match_the_answer_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._tmp = d
+            ds = self._collected(d)
+            card = Path(d) / "orders.toml"
+            # The answer file compares "two pages" against "three pages", so the
+            # baseline is the two-page revision -- the second one made, not the
+            # newest. Reading it as "the newest" made every row look new.
+            base = revisions.list_revisions(ds)[-2].revision_id
+
+            cur = self._csv("ledger", "-d", str(ds), "-p", str(card), "--view", "current")
+            want = self._answer("expected-current.csv")
+            self.assertEqual([r[:6] for r in cur], [r[:6] for r in want],
+                             "当前台账与独立答案不一致")
+            # `_pending` is prose in the tool and a flag in the answer file.
+            self.assertEqual([bool(r[6]) for r in cur[1:]],
+                             [bool(r[6]) for r in want[1:]],
+                             "哪些行待处理与答案不一致")
+
+            chg = self._csv("ledger", "-d", str(ds), "-p", str(card),
+                            "--view", "changes", "--baseline", base)
+            want_chg = self._answer("expected-changes.csv")
+            # Answer has no 说明 column: it would carry run timestamps.
+            self.assertEqual([r[:5] for r in chg], [r[:5] for r in want_chg],
+                             "变化表与独立答案不一致")
+
+            pen = self._csv("ledger", "-d", str(ds), "-p", str(card), "--view", "pending")
+            want_pen = self._answer("expected-pending.csv")
+            self.assertEqual([r[0] for r in pen], [r[0] for r in want_pen])
+            self.assertEqual([r[-1] for r in pen], [r[-1] for r in want_pen],
+                             "待处理行的字段与答案不一致")
+
+    def test_an_older_version_arriving_late_does_not_undo_a_newer_one(self):
+        """A05: page 3 carries A20260314001 with an *earlier* 更新时间.
+
+        The ledger sorts by the declared business time, so the late-arriving
+        older row must lose -- reading order is not business order.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            self._tmp = d
+            ds = self._collected(d)
+            card = Path(d) / "orders.toml"
+            rows = self._csv("ledger", "-d", str(ds), "-p", str(card), "--view", "current")
+            by_key = {r[0]: r for r in rows[1:]}
+            self.assertEqual(by_key["A20260314001"][3], "已发货",
+                             "晚到的旧版本把当前状态改回去了")
+            self.assertEqual(by_key["A20260314002"][3], "已付款")
+            self.assertEqual(by_key["A20260314005"][3], "已退款")
+            # The history keeps both observations: nothing was overwritten.
+            hist = self._csv("ledger", "-d", str(ds), "-p", str(card), "--view", "history")
+            states = [r for r in hist[1:] if r and r[0] == "A20260314001"]
+            self.assertGreaterEqual(len({r[-2] for r in states}), 1)
+
+    def test_a_tie_is_flagged_rather_than_silently_decided(self):
+        """A06: two observations, same 更新时间, different 状态.
+
+        A20260314004 was 已发货 on page 1 and 已完成 on page 3, both stamped
+        2026-03-14 11:20. The ledger must not pretend this is a clean update.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            self._tmp = d
+            ds = self._collected(d)
+            card = Path(d) / "orders.toml"
+            rows = self._csv("ledger", "-d", str(ds), "-p", str(card), "--view", "current")
+            tie = {r[0]: r for r in rows[1:]}["A20260314004"]
+            self.assertIn("排序值相同", tie[6], "同一业务时间的两个版本没有被标出来")
+            self.assertIn("内容不同", tie[6])
+            # And it is not reported as an ordinary update either.
+            base = revisions.list_revisions(ds)[-2].revision_id
+            chg = self._csv("ledger", "-d", str(ds), "-p", str(card),
+                            "--view", "changes", "--baseline", base)
+            self.assertNotIn(("A20260314004", "状态"),
+                             {(r[1], r[2]) for r in chg[1:] if r[1] == "A20260314004"
+                              and r[2] == "状态" and r[0] == "updated"},
+                             "同一业务时间的歧义被当成了一次普通更新")
+
+    def test_an_order_that_was_not_observed_again_is_not_deleted(self):
+        """A12: page 3 mentions six of twelve orders. The other six stay."""
+        with tempfile.TemporaryDirectory() as d:
+            self._tmp = d
+            ds = self._collected(d)
+            card = Path(d) / "orders.toml"
+            rows = self._csv("ledger", "-d", str(ds), "-p", str(card), "--view", "current")
+            keys = {r[0] for r in rows[1:]}
+            self.assertEqual(len(keys), 12, "没被重新观察到的订单被当成删除了")
+            self.assertIn("A20260315005", keys)
+
+    def test_a_changed_rule_is_not_reported_as_a_business_change(self):
+        """A13: reparse with a different rule, then compare the two revisions.
+
+        The values differ, but not because the business changed -- so the diff
+        has to say `rule_reparse`, not "状态 变了".
+        """
+        with tempfile.TemporaryDirectory() as d:
+            self._tmp = d
+            ds = self._collected(d)
+            base = revisions.list_revisions(ds)[-1].revision_id
+            card = Path(d) / "orders.toml"
+            edited = Path(d) / "edited.toml"
+            # Point 状态 at the 下单时间 column: same parser, different rule, so
+            # every value changes while no order did.
+            edited.write_text(
+                card.read_text(encoding="utf-8").replace(
+                    'col  = 3', 'col  = 4', 1),
+                encoding="utf-8")
+            code, out, err = run_cli("replay", "-d", str(ds), "-p", str(edited),
+                                     "--show", "3", "--select")
+            self.assertEqual(code, 0, out + err)
+            self.assertIn("处字段变化", out)
+            new_rev = revisions.list_revisions(ds)[-1].revision_id
+            chg = self._csv("ledger", "-d", str(ds), "-p", str(card),
+                            "--view", "changes", "--baseline", base)
+            kinds = {(r[0], r[2]) for r in chg[1:]}
+            self.assertIn(("rule_reparse", "状态"), kinds,
+                          "换规则引起的变化被混成了业务变化")
+            self.assertEqual(new_rev, revisions.list_revisions(ds)[-1].revision_id)
+
+
+    def test_the_three_views_export_to_xlsx(self):
+        """S2-08 asks for 当前台账 / 变化表 / 待处理表 as files, not screens.
+
+        The renderer is the same one the single-table export uses, so what is
+        checked here is that all three views reach it with their own columns --
+        a view that exports the wrong header would look fine on screen and be
+        useless in the spreadsheet the user actually opens.
+        """
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as d:
+            self._tmp = d
+            ds = self._collected(d)
+            card = Path(d) / "orders.toml"
+            base = revisions.list_revisions(ds)[-2].revision_id
+            expect = {
+                "current": ["订单号", "_pending"],
+                "changes": ["类型", "实体", "字段"],
+                "pending": ["实体", "原因"],
+            }
+            for view, must in expect.items():
+                with self.subTest(view=view):
+                    out_path = Path(d) / f"{view}.xlsx"
+                    argv = ["ledger", "-d", str(ds), "-p", str(card),
+                            "--view", view, "-f", "xlsx", "-o", str(out_path)]
+                    if view == "changes":
+                        argv += ["--baseline", base]
+                    code, out, err = run_cli(*argv)
+                    self.assertEqual(code, 0, out + err)
+                    self.assertTrue(out_path.is_file())
+                    xml = zipfile.ZipFile(out_path).read(
+                        "xl/worksheets/sheet1.xml").decode("utf-8")
+                    head = re.findall(r"<t[^>]*>([^<]*)</t>", xml)
+                    for col in must:
+                        self.assertIn(col, head[:8],
+                                      f"{view} 导出的表头没有 {col}")
 
 
 if __name__ == "__main__":

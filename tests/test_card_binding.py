@@ -177,6 +177,26 @@ class TestCardBinding(unittest.TestCase):
             self.assertIn("通道", str(ctx.exception))
 
 
+    def test_changing_the_ledger_order_is_drift(self):
+        """`[ledger]` decides which observation counts as current.
+
+        It does not change how a page is parsed, but it changes the *result* of
+        reading the same saved pages -- so two collections with different
+        `[ledger]` sections are not comparable, which is exactly what the drift
+        check exists to refuse.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_from_card(_card(), tmp)
+            text = TEMPLATE.format(title_index=0, price_index=1).replace(
+                'mode = "lines"',
+                'mode = "lines"' + chr(10) + chr(10)
+                + '[ledger]' + chr(10) + 'sort = "observed"')
+            moved = parse_card(tomllib.loads(text), "card.toml")
+            with self.assertRaises(InputError) as ctx:
+                dataset_from_card(moved, tmp)
+            self.assertIn("ledger", str(ctx.exception))
+
+
 class TestDriftWords(unittest.TestCase):
     """The message is the whole feature; it has to name the actual difference."""
 

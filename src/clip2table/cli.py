@@ -20,7 +20,7 @@ from .cards.loader import list_builtin, load_card, resolve_card
 from .cards.schema import Card
 from .core import _text_of as _text_of_cap, parse_capture
 from .errors import BAD_INPUT, OK, ChannelError, Clip2TableError, InputError
-from .flow import Totals, open_dataset, run_report_fields
+from .flow import Totals, finish, open_dataset, run_report_fields
 from .models import Captured
 from .pipeline.normalize import normalize_text, to_lines
 from .report import Report, sample_block
@@ -210,6 +210,84 @@ def build_parser() -> argparse.ArgumentParser:
                         help="卡换过了也往这个 dataset 里写")
     run2_p.add_argument("--show", type=int, default=3)
 
+    # ---------------------------------------------------------- rev / replay
+    rev_p = sub.add_parser(
+        "rev", help="看一个 dataset 的结果版本：列出、对比、选中")
+    rev_sub = rev_p.add_subparsers(dest="rev_cmd")
+    rev_list = rev_sub.add_parser("list", help="列出这个 dataset 的所有结果版本")
+    rev_list.add_argument("-d", "--dataset", required=True)
+    rev_list.add_argument("--json", action="store_true")
+    rev_show = rev_sub.add_parser("show", help="看某个版本（默认当前选中的那个）")
+    rev_show.add_argument("revision", nargs="?", default=None)
+    rev_show.add_argument("-d", "--dataset", required=True)
+    rev_show.add_argument("--json", action="store_true")
+    rev_diff = rev_sub.add_parser("diff", help="对比两个版本覆盖了什么")
+    rev_diff.add_argument("left")
+    rev_diff.add_argument("right")
+    rev_diff.add_argument("-d", "--dataset", required=True)
+    rev_diff.add_argument("--json", action="store_true")
+    rev_sel = rev_sub.add_parser("select", help="把某个版本设为当前台账")
+    rev_sel.add_argument("revision")
+    rev_sel.add_argument("-d", "--dataset", required=True)
+    rev_sel.add_argument("--expect", default=None,
+                         help="当前应该是这个版本，不是就拒绝（防并发误切）")
+    rev_sel.add_argument("--allow-incomplete", dest="allow_incomplete",
+                         action="store_true",
+                         help="就算解析结果行数不守恒也切换（不建议）")
+    rev_legacy = rev_sub.add_parser(
+        "legacy", help="旧数据集逐页能做什么：哪些能重算、哪些只能保留结果")
+    rev_legacy.add_argument("-d", "--dataset", required=True)
+    rev_legacy.add_argument("--json", action="store_true")
+    rev_adopt = rev_sub.add_parser(
+        "adopt", help="把旧数据集的一页登记成新布局的捕获与解析结果")
+    rev_adopt.add_argument("-d", "--dataset", required=True)
+    rev_adopt.add_argument("page", type=int)
+    rev_adopt.add_argument("--kind", default="",
+                           help="这一页当时是 text 还是 html（旧数据没记，必须由人指定）")
+    rev_adopt.add_argument("--json", action="store_true")
+    rev_adopt.add_argument("--source", default="", help="旧数据集目录；-d 指定采用后的目标目录")
+
+    rp_p = sub.add_parser(
+        "replay", help="用存下来的原文和一套规则重新解析，不重新采集")
+    rp_p.add_argument("-d", "--dataset", required=True)
+    rp_p.add_argument("-p", "--card", default=None,
+                      help="试一份改过的卡（不写回卡文件）")
+    rp_p.add_argument("--rule", default="", help="用已有的规则快照重解析")
+    rp_p.add_argument("--from", dest="base", default=None,
+                      help="在哪个版本的基础上重解析（默认当前台账）")
+    rp_p.add_argument("--capture", action="append", default=None,
+                      help="只重解析这几份原文（可重复；默认该版本的全部）")
+    rp_p.add_argument("--select", action="store_true",
+                      help="重解析成功并且完整时，直接设为当前台账")
+    rp_p.add_argument("--json", action="store_true")
+    rp_p.add_argument("--show", type=int, default=10)
+
+    # ---------------------------------------------------------------- ledger
+    lg_p = sub.add_parser(
+        "ledger", help="把一个结果版本读成台账：当前状态 / 变化 / 历史 / 待处理")
+    lg_p.add_argument("-d", "--dataset", required=True)
+    lg_p.add_argument("revision", nargs="?", default=None,
+                      help="看哪个版本（默认当前台账）")
+    lg_p.add_argument("--baseline", default="",
+                      help="跟哪个版本比变化（默认不比，只出当前状态）")
+    lg_p.add_argument("--view", default="current",
+                      choices=["current", "changes", "history", "pending"],
+                      help="current=每个实体现在的值；changes=相对基线变了什么；"
+                           "history=每个实体被观察到的全部版本；pending=需要人判断的")
+    lg_p.add_argument("-p", "--card", default=None,
+                      help="用这张卡的 [ledger] 与字段声明（默认用该版本的规则快照）")
+    lg_p.add_argument("-f", "--format", action="append", default=None,
+                      choices=["csv", "md", "jsonl", "xlsx"])
+    lg_p.add_argument("-o", "--out", default=None)
+    lg_p.add_argument("--dir", default=None)
+    lg_p.add_argument("--json", action="store_true")
+    lg_p.add_argument("--show", type=int, default=20)
+
+    for execution in (run_p, har_p, run2_p):
+        execution.add_argument("--request-id", default="", help="同一请求重试时复用此标识")
+        execution.add_argument("--resume", default="", help="继续已有 operation_id 或 run_id")
+        execution.add_argument("--answer", default="", help="动作回答 JSON 文件，包含 checkpoint 和 action_response")
+
     return p
 
 
@@ -331,8 +409,81 @@ def _engine_label(cap: Captured) -> str:
             "file": "FILE"}.get(cap.channel or "", "-")
 
 
+def _uses_api(args) -> bool:
+    from . import revisions
+    return bool(getattr(args, "dataset", None) and not getattr(args, "dry_run", False)
+                and revisions.layout_of(args.dataset) != 1)
+
+
+def _run_dataset_api(args, card, *, single=False, tasks=None, started=None) -> int:
+    """CLI adapter: request in, structured result out; statistics use actual progress."""
+    from . import api
+    import dataclasses
+    import time
+    root = str(args.dataset)
+    if getattr(args, "resume", ""):
+        answer = json.loads(Path(args.answer).read_text(encoding="utf-8")) if args.answer else {}
+        handle = args.resume
+        resume_request = api.ResumeRequest(
+            dataset=root, request_id=args.request_id,
+            operation_id=handle if handle.startswith("op-") else "",
+            run_id=handle if handle.startswith("run-") else "",
+            checkpoint=answer.get("checkpoint", {}), action_response=answer.get("action_response", {}),
+            max_pages=getattr(args, "max_pages", None))
+        result = api.operation_status(resume_request) if getattr(args, "dry_run", False) else api.resume(resume_request)
+    else:
+        capture = {}
+        if single and not any(getattr(args, k, None) for k in ("text_file", "html_file", "url")):
+            capture = dataclasses.asdict(_capture_from_args(args)[0])
+        request = api.ExecuteRequest(
+            request_id=getattr(args, "request_id", ""), dataset=root,
+            text_file=getattr(args, "text_file", "") or "",
+            html_file=getattr(args, "html_file", "") or "", url=getattr(args, "url", "") or "",
+            max_pages=1 if single else getattr(args, "max_pages", None),
+            port=getattr(args, "port", None), allow_force=getattr(args, "force", False),
+            append_from_here=getattr(args, "append_from_here", False), capture=capture)
+        result = api.execute(request, card)
+    summary = None
+    if tasks is not None and not getattr(args, "dry_run", False) and result.run_id:
+        summary = tasks.record_run(
+            tasks.stats_path(_card_path_for_stats(card, args.card)),
+            rows=result.counts.get("dataset_rows", result.counts.get("rows", 0)),
+            pages=result.counts.get("pages", 0), ok=result.ok,
+            seconds=time.monotonic() - started, channel=card.channel,
+            note=result.message, run_id=result.run_id, request_id=result.request_id)
+    if getattr(args, "json", False):
+        body = result.as_dict()
+        body.update(this_run_rows=result.counts.get("this_request_rows", result.counts.get("rows", 0)),
+                    dataset_rows=result.counts.get("dataset_rows", 0))
+        if summary is not None:
+            body["task_stats"] = summary
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+    else:
+        if result.ok:
+            this_rows = result.counts.get("this_request_rows", result.counts.get("rows", 0))
+            print(f"本轮取到 {this_rows} 行；提交进 dataset {this_rows} 行")
+            from . import revisions
+            rid = result.outputs.get("revision")
+            pages = len(revisions.read_revision(root, rid).entries) if rid else 0
+            print(f"dataset：{root}（累计 {result.counts.get('dataset_rows', 0)} 行，已提交页 {pages}）")
+            print(f"结果版本：{result.outputs.get('revision', '')}")
+        else:
+            print(result.message or result.reason, file=sys.stderr)
+            if result.error:
+                print(f"  {result.error.get('code')}：{result.error.get('hint', '')}", file=sys.stderr)
+            if result.action:
+                print(json.dumps({"action": result.action, "checkpoint": result.checkpoint},
+                                 ensure_ascii=False, indent=2), file=sys.stderr)
+        print(f"操作：{result.operation_id}　运行：{result.run_id}")
+        if summary is not None:
+            for line in tasks.describe(summary):
+                print(line)
+    return OK if result.ok else BAD_INPUT
+
+
 def cmd_run(args) -> int:
-    cap, why = _capture_from_args(args)
+    if getattr(args, "resume", ""):
+        return _run_dataset_api(args, None)
     card = resolve_card(args.card) if args.card else None
     if args.dataset and card is None:
         # A dataset binds a card snapshot, a field definition and a key rule.
@@ -342,6 +493,9 @@ def cmd_run(args) -> int:
             "run -d 需要同时给 -p 一张卡",
             hint="先 `clip2table infer --write-card x.toml` 定住字段，"
                  "再 `run -p x.toml -d 目录`")
+    if _uses_api(args):
+        return _run_dataset_api(args, card, single=True)
+    cap, why = _capture_from_args(args)
     res, inf = parse_capture(cap, card)
     fields = card.field_names if card else (inf.result.fields if inf else res.fields)
 
@@ -364,9 +518,14 @@ def cmd_run(args) -> int:
     if committer is not None:
         committer.page(start_page, cap.payload or "",
                        dict(cap.provenance(), why=why or "run", card=card.name),
-                       res, append_from_here=append_from_here)
+                       res, append_from_here=append_from_here, captured=cap)
         rep.result = ds.as_result()
         res = rep.result
+        rev = finish(committer, reason=f"run: {card.name}")
+        if rev is not None:
+            print(f"结果版本：{rev.revision_id}"
+                  f"{'' if rev.complete else '（不完整，没切换台账）'}",
+                  file=sys.stderr)
     rep.extra.update(run_report_fields(ds, totals, args.dry_run))
 
     if not args.dry_run and ds is None:
@@ -400,6 +559,9 @@ def cmd_harvest(args) -> int:
     from .harvest import harvest_pages
     from .pipeline.assemble import merge_pages
 
+    if getattr(args, "resume", ""):
+        return _run_dataset_api(args, None)
+
     card = resolve_card(args.card) if args.card else None
     if card is None:
         raise InputError("harvest 必须给一张卡：-p 卡片.toml",
@@ -415,10 +577,6 @@ def cmd_harvest(args) -> int:
 
     # Where to write is decided once, here, and a preview gets no committer at
     # all -- so no callback further down can write "just this one file".
-    committer, start_page, append_from_here = open_dataset(args, card, card.channel)
-    ds = committer.ds if committer else None
-    totals = Totals()
-
     if max_pages > 1 and not args.yes:
         # Deliberate friction: 50 unverified pages is 50 pages of garbage and
         # 50x the load on someone else's server. One page first, always.
@@ -435,6 +593,13 @@ def cmd_harvest(args) -> int:
             print("已取消", file=sys.stderr)
             return BAD_INPUT
 
+    if _uses_api(args):
+        return _run_dataset_api(args, card)
+
+    committer, start_page, append_from_here = open_dataset(args, card, card.channel)
+    ds = committer.ds if committer else None
+    totals = Totals()
+
     def land(rnd) -> None:
         """Commit this page before the next page is attempted.
 
@@ -447,7 +612,7 @@ def cmd_harvest(args) -> int:
         committer.page(
             rnd.page, cap.payload or "",
             dict(cap.provenance(), why=rnd.why, card=card.name),
-            rnd.result, append_from_here=append_from_here)
+            rnd.result, append_from_here=append_from_here, captured=cap)
 
     multi = harvest_pages(card, max_pages=max_pages, port=args.port,
                           allow_force=args.force, start_page=start_page,
@@ -504,6 +669,11 @@ def cmd_harvest(args) -> int:
             })
         final = ds.as_result()
         rep.result = final
+        rev = finish(committer, reason=f"harvest: {card.name}")
+        if rev is not None:
+            print(f"结果版本：{rev.revision_id}"
+                  f"{'' if rev.complete else '（不完整，没切换台账）'}",
+                  file=sys.stderr)
     rep.extra.update(run_report_fields(ds, totals, args.dry_run))
 
     written: list[Path] = []
@@ -602,6 +772,10 @@ def cmd_infer(args) -> int:
 
 
 def _export_dataset(args) -> int:
+    from . import revisions, api
+    if revisions.layout_of(args.dataset) == 2:
+        rid = revisions.active(args.dataset).get("revision_id", "")
+        return _export_ledger_api(args, rid, api.default_policy(args.dataset, rid), include_metadata=False)
     """Re-emit an existing dataset. Never re-collects: same input, same table."""
     from .dataset import Dataset, require_dir
 
@@ -686,6 +860,390 @@ def cmd_export(args) -> int:
         _emit(rep, args)
         for w in written:
             print(f"已写出：{w}")
+    return OK
+
+
+def cmd_rev(args) -> int:
+    """`rev` family: list / show / diff / select over result revisions."""
+    from . import revisions
+
+    sub = getattr(args, "rev_cmd", None)
+    root = Path(args.dataset)
+    if sub == "adopt" and getattr(args, "source", ""):
+        if Path(args.source).resolve() == root.resolve():
+            raise InputError("--source 与目标 -d 应使用不同目录")
+        revisions.init(root)
+    if not root.is_dir():
+        raise InputError(f"没有这个目录：{root}",
+                         hint="rev 用的是某个 dataset 目录，不是卡文件")
+    if revisions.layout_of(root) != 2 and sub != "legacy":
+        raise InputError(
+            f"{root} 还是旧布局，没有结果版本",
+            hint="旧数据继续按原样读写；要看版本目录得先用这个版本采一次"
+                 "（新出生的目录就是新布局）")
+
+    if sub == "list" or sub is None:
+        revs = revisions.list_revisions(root)
+        cur = revisions.active(root).get("revision_id") or ""
+        if getattr(args, "json", False):
+            print(json.dumps({"active": cur,
+                              "revisions": [r.as_dict() for r in revs]},
+                             ensure_ascii=False, indent=2))
+            return OK
+        if not revs:
+            print("还没有任何结果版本")
+            return OK
+        print(f"共 {len(revs)} 个结果版本（★ 是当前台账）")
+        for r in revs:
+            mark = "★" if r.revision_id == cur else " "
+            body = "完整" if r.complete else "不完整"
+            print(f" {mark} {r.revision_id} ｜ {len(r.entries)} 份原文 ｜ {body}"
+                  f" ｜ {r.reason or '—'} ｜ {r.created}")
+            if r.parent:
+                print(f"     ← 基于 {r.parent}")
+            if r.note:
+                print(f"     {r.note}")
+        return OK
+
+    if sub == "show":
+        rid = args.revision or revisions.active(root).get("revision_id") or ""
+        if not rid:
+            raise InputError("这个 dataset 还没有选中的版本",
+                             hint=f"clip2table rev list -d {root}")
+        rev = revisions.read_revision(root, rid)
+        # Per-capture detail comes from the parse objects, not from the revision
+        # alone: "3 份原文" says nothing about which pages they were or how big.
+        detail = []
+        for cid, pid in zip(rev.captures, rev.parses):
+            try:
+                cref, _ = revisions.read_capture(root, cid)
+                pref = next((p for p in revisions.list_parses(root)
+                             if p.parse_id == pid), None)
+            except InputError:
+                continue
+            detail.append({
+                "capture_id": cid, "parse_id": pid,
+                "page": cref.page, "kind": cref.kind,
+                "observed_at": cref.observed_at,
+                "rows": pref.rows if pref else None,
+                "unparsed": pref.unparsed if pref else None,
+                "rule_id": pref.rule_id if pref else "",
+                "parser_build": pref.parser_build if pref else "",
+            })
+        if getattr(args, "json", False):
+            print(json.dumps({"revision": rev.as_dict(), "parses": detail},
+                             ensure_ascii=False, indent=2))
+            return OK
+        print(f"版本 {rev.revision_id}"
+              f"{'（当前台账）' if rid == revisions.active(root).get('revision_id') else ''}")
+        print(f"  创建：{rev.created}　原因：{rev.reason or '—'}")
+        if rev.parent:
+            print(f"  基于：{rev.parent}")
+        print(f"  完整性：{'行数守恒' if rev.complete else '不完整（有解析结果行数不守恒）'}")
+        if rev.note:
+            print(f"  备注：{rev.note}")
+        print(f"  覆盖 {len(rev.entries)} 份原文：")
+        for d in detail:
+            rows = "?" if d["rows"] is None else d["rows"]
+            print(f"    第 {d['page']} 页 ｜ {d['kind']} ｜ {rows} 行 ｜ {d['observed_at']}")
+            print(f"      {d['capture_id']} → {d['parse_id']}")
+            print(f"      规则 {d['rule_id']}　解析器 {d['parser_build']}")
+        return OK
+
+    if sub == "diff":
+        from . import api, replay
+        result = api.compare(api.CompareRequest(dataset=str(root), left=args.left, right=args.right))
+        _require_ok(result)
+        diff = replay.RevisionDiff(**result.data)
+        if getattr(args, "json", False):
+            print(json.dumps({"left": diff.left, "right": diff.right,
+                              "only_left": diff.only_left,
+                              "only_right": diff.only_right,
+                              "reparsed": diff.reparsed},
+                             ensure_ascii=False, indent=2))
+            return OK
+        print(diff.headline())
+        for c in diff.only_left:
+            print(f"  只在 {diff.left}：{c}")
+        for c in diff.only_right:
+            print(f"  只在 {diff.right}：{c}")
+        for c in diff.reparsed:
+            print(f"  换了规则重解析：{c}")
+        if diff.only_left or diff.only_right:
+            print()
+            print("两边覆盖的原文不一样，所以这两个版本不是同一批数据的两种读法。"
+                  "要比较业务变化，先让它们覆盖同一批原文。")
+        return OK
+
+    if sub == "select":
+        from . import api
+        before = revisions.active(root).get("revision_id") or ""
+        rev = revisions.read_revision(root, args.revision)
+        result = api.select_revision(api.SelectRequest(
+            dataset=str(root), revision=args.revision, expect=args.expect or "",
+            allow_incomplete=args.allow_incomplete,
+            expected_active_token=revisions.active_token(root)))
+        _require_ok(result)
+        print(f"当前台账：{rev.revision_id}"
+              f"{'' if rev.complete else '（不完整）'}")
+        if before and before != rev.revision_id:
+            print(f"  上一个：{before}")
+        if not rev.complete:
+            print("⚠ 这个版本的解析结果行数不守恒，台账可能缺行。"
+                  "确认过再继续用。", file=sys.stderr)
+        return OK
+
+    if sub == "legacy":
+        rows = revisions.legacy_pages(root)
+        if getattr(args, "json", False):
+            print(json.dumps({"pages": rows}, ensure_ascii=False, indent=2))
+            return OK
+        if not rows:
+            print("这个目录里没有旧布局的页（pages/ 为空），不用迁移")
+            return OK
+        print(f"旧布局共 {len(rows)} 页（新布局的版本目录与它们并存，不会改动原文件）")
+        for r in rows:
+            if r["reparseable"]:
+                state = "可以重算"
+            elif r["has_raw"]:
+                state = "能重算，但要你指定这一页是 text 还是 html"
+            else:
+                state = "不能重算"
+            print(f"  第 {r['page']} 页 ｜ {r['rows'] if r['rows'] is not None else '?'} 行"
+                  f" ｜ {r['kind'] or '类型未知'} ｜ {state}")
+            if r["why_not"]:
+                print(f"    {r['why_not']}")
+        print()
+        print("重算一页：clip2table rev adopt -d <目录> <页号> --kind text")
+        print("不重算也能留着：登记以后，历史里就有这一页当初的结果。")
+        return OK
+
+    if sub == "adopt":
+        cref, pref = revisions.adopt_legacy_page(
+            root, args.source or root, args.page, assume_kind=args.kind)
+        with revisions.writer(root):
+            base = revisions.active(root).get("revision_id")
+            entries = revisions.carry_forward(root, base, [(cref.capture_id, pref.parse_id)])
+            revision = revisions.write_revision(root, entries, parent=base, reason="adopt legacy",
+                                                policy=pref.legacy_policy)
+        if getattr(args, "json", False):
+            print(json.dumps({"capture": cref.as_dict(), "parse": pref.as_dict(), "candidate": revision.revision_id},
+                             ensure_ascii=False, indent=2))
+            return OK
+        print(f"已登记第 {args.page} 页：{cref.capture_id} → {pref.parse_id}")
+        print(f"  {pref.rows} 行，规则 {pref.rule_id}")
+        print(f"  候选版本：{revision.revision_id}；使用 rev select 显式选择")
+        return OK
+
+    raise InputError("rev 后面要跟 list / show / diff / select / legacy / adopt")
+
+
+def cmd_replay(args) -> int:
+    """Offline reparse: saved captures + a rule -> a candidate revision."""
+    from . import api, replay, revisions
+
+    root = Path(args.dataset)
+    if not root.is_dir():
+        raise InputError(f"没有这个目录：{root}")
+    if revisions.layout_of(root) != 2:
+        raise InputError(f"{root} 还是旧布局，没有可以重解析的原文记录",
+                         hint="重解析要存了原文和规则快照才做得到；旧页只能逐页登记")
+    base = args.base or revisions.active(root).get("revision_id") or ""
+    if not base:
+        raise InputError("这个 dataset 还没有选中的版本",
+                         hint="先正常采一次，或者用 --from 指定一个版本")
+
+    card = resolve_card(args.card) if getattr(args, "card", None) else None
+    result = api.reparse(api.ReparseRequest(dataset=str(root), base=base,
+                                          rule=args.rule or "", captures=args.capture or [],
+                                          select=args.select), card)
+    if getattr(args, "json", False):
+        print(result.to_json())
+        return OK if result.ok else BAD_INPUT
+    _require_ok(result)
+    rep = replay.Reparse(revision=revisions.ResultRevision.from_dict(result.data["revision"]),
+                        rule=revisions.RuleSnapshot.from_dict(result.data["rule"]))
+    for saved in result.data["diffs"]:
+        diff = replay.ParseDiff(capture_id=saved["capture_id"], before="", after="",
+                                only_before=saved["only_before"], only_after=saved["only_after"],
+                                ambiguous=saved["ambiguous"], boundaries=saved["boundaries"])
+        diff.changes = [replay.CellChange(key=c["key"], field_name=c["field"],
+                                        before=c["before"], after=c["after"],
+                                        line_before=c["line_before"], line_after=c["line_after"])
+                        for c in saved["changes"]]
+        rep.diffs.append(diff)
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "revision": rep.revision.as_dict(),
+            "rule": rep.rule.as_dict(),
+            "changed": rep.changed,
+            "diffs": [{"capture_id": d.capture_id,
+                       "headline": d.headline(),
+                       "changes": [c.as_dict() for c in d.changes],
+                       "only_before": d.only_before,
+                       "only_after": d.only_after,
+                       "ambiguous": d.ambiguous} for d in rep.diffs],
+            "failed": rep.failed,
+        }, ensure_ascii=False, indent=2))
+        return OK
+
+    print(rep.headline())
+    print(f"  规则：{rep.rule.rule_id}（{rep.rule.card_name}）")
+    for d in rep.diffs:
+        print(f"  {d.capture_id}：{d.headline()}")
+        for c in d.changes[:max(1, args.show)]:
+            print(f"    {c.line()}")
+        if len(d.changes) > args.show:
+            print(f"    …另有 {len(d.changes) - args.show} 处")
+        note = d.unmatched_note()
+        if note:
+            print(f"    {note}")
+    for f in rep.failed:
+        print(f"  ✗ {f['capture_id']}：{f['why']}")
+    print()
+    if not rep.revision.complete:
+        print(f"⚠ 候选版本 {rep.revision.revision_id} 不完整，不能当作台账", file=sys.stderr)
+    elif args.select:
+        print(f"已切换台账到 {rep.revision.revision_id}（原 {base} 仍在）")
+    else:
+        print(f"候选版本：{rep.revision.revision_id}（还没切换台账）")
+        print(f"  看它覆盖了什么：clip2table rev show {rep.revision.revision_id} -d {root}")
+        print(f"  确认要换：clip2table rev select {rep.revision.revision_id} -d {root} --expect {base}")
+    return OK
+
+
+def cmd_ledger(args) -> int:
+    """`ledger`: one revision + one policy -> the three views.
+
+    The view itself is built by `api.ledger_view`, not here. The CLI prints what
+    a program gets; two independent readings of one revision is how a count ends
+    up different depending on who asked.
+    """
+    from . import api
+    from . import revisions
+
+    root = Path(args.dataset)
+    if not root.is_dir():
+        raise InputError(f"没有这个目录：{root}")
+    if revisions.layout_of(root) != 2:
+        raise InputError(f"{root} 还是旧布局，没有结果版本",
+                         hint="台账读的是结果版本；旧数据请继续用 export -d")
+
+    rid = args.revision or revisions.active(root).get("revision_id") or ""
+    if not rid:
+        raise InputError(f"这个 dataset 还没有选中的版本",
+                         hint=f"clip2table rev list -d {root}")
+
+    policy = _ledger_policy(args, root, rid)
+    rows, fields, led = api.ledger_view(root, rid, args.baseline or "",
+                                        args.view, policy)
+
+    if args.json:
+        print(json.dumps(led.as_dict(), ensure_ascii=False, indent=2))
+        return OK
+
+    if not rows:
+        print("（这个视图是空的）")
+        for n in led.notes:
+            print(f"· {n}")
+        return OK
+
+    if args.format or args.out:
+        return _export_ledger_api(args, rid, policy)
+
+    _print_table(rows, fields, limit=max(1, args.show))
+    print()
+    print(f"版本 {led.revision_id}"
+          f"（{len(led.current)} 个实体，按 {policy.sort}"
+          f"{'：' + policy.sort_field if policy.sort_field else ''}）")
+    for n in led.notes:
+        print(f"· {n}")
+    if led.skipped:
+        print(f"· {len(led.skipped)} 行缺主键，没有并进任何实体：")
+        for s in led.skipped[:5]:
+            print(f"    {s.get('page')} 页 ｜ {s.get('why')}")
+    return OK
+
+
+def _print_table(rows: list[dict[str, str]], fields: list[str], limit: int) -> None:
+    """A width-fitted plain table. Same shape as the task preview, on purpose."""
+    shown = rows[:limit]
+    widths = {}
+    for f in fields:
+        widths[f] = max([_cell_w(f)] + [_cell_w(str(r.get(f, ""))) for r in shown])
+    print("  " + "  ".join(_pad(f, widths[f]) for f in fields))
+    for r in shown:
+        print("  " + "  ".join(_pad(str(r.get(f, "")), widths[f]) for f in fields))
+    if len(rows) > limit:
+        print(f"  …还有 {len(rows) - limit} 行（用 --show 调大）")
+
+
+def _cell_w(s: str) -> int:
+    return sum(2 if ord(c) > 0x2E80 else 1 for c in s)
+
+
+def _pad(s: str, n: int) -> str:
+    return s + " " * max(0, n - _cell_w(s))
+
+
+def _ledger_policy(args, root: Path, rid: str):
+    from . import api, ledger
+    if getattr(args, "card", None):
+        return ledger.policy_from_card(resolve_card(args.card))
+    return api.default_policy(root, rid)
+
+
+def _require_ok(result):
+    if not result.ok:
+        raise InputError(result.message or result.error.get("code", result.reason),
+                         hint=result.error.get("hint", ""),
+                         code=result.error.get("code", "bad_input"))
+
+
+def _export_ledger_api(args, rid, policy, *, include_metadata=True):
+    from . import api
+    fmts = args.format or ([Path(args.out).suffix.lstrip(".") or "csv"] if args.out else ["csv"])
+    for fmt in fmts:
+        target = (Path(args.out) if len(fmts) == 1 else Path(args.out).with_suffix("." + fmt)) if args.out else (
+            Path(getattr(args, "dir", None) or args.dataset) / ("export." + fmt))
+        result = api.export(api.ExportRequest(
+            dataset=str(args.dataset), revision=rid,
+            baseline=getattr(args, "baseline", "") or "",
+            view=getattr(args, "view", "current"), format=fmt, out=str(target),
+            overwrite=True, include_metadata=include_metadata), policy)
+        _require_ok(result)
+        if getattr(args, "json", False):
+            print(result.to_json())
+        else:
+            print(f"已写出：{result.outputs['file']}（{result.counts['rows']} 行）")
+    return OK
+
+
+def _export_rows(rows: list[dict[str, str]], fields: list[str], args, stem: str) -> int:
+    """Export a plain row dict -- the ledger views are already flat."""
+    from .models import Row as ModelRow
+    from .render.xlsx import write_any
+
+    fmts = list(args.format or [])
+    if args.out and not fmts:
+        fmts = [Path(args.out).suffix.lstrip(".").lower() or "csv"]
+    if not fmts:
+        fmts = ["csv"]
+    written: list[Path] = []
+    model_rows = [ModelRow(values=dict(r)) for r in rows]
+    for fmt in fmts:
+        if args.out and len(fmts) == 1:
+            target = Path(args.out)
+        elif args.out:
+            target = Path(args.out).with_suffix(f".{fmt}")
+        else:
+            base = Path(args.dir) if args.dir else Path.cwd()
+            target = base / f"{stem}.{fmt}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        write_any(fmt, model_rows, fields, target)
+        written.append(target)
+    for w in written:
+        print(f"写入 {w}")
     return OK
 
 
@@ -1181,11 +1739,26 @@ def _task_run(args, tasks) -> int:
     """
     import time
 
-    card = resolve_card(args.card)
     started = time.monotonic()
     dataset = getattr(args, "dataset", None)
+    if getattr(args, "resume", ""):
+        from . import api, revisions
+        handle = args.resume
+        status = api.operation_status(api.ResumeRequest(
+            dataset=str(dataset or ""), operation_id=handle if handle.startswith("op-") else "",
+            run_id=handle if handle.startswith("run-") else ""))
+        if not status.run_id:
+            return _run_dataset_api(args, None)
+        run = revisions.read_run(dataset, status.run_id)
+        card = revisions.restore_card(run.config["card"])
+        return _run_dataset_api(args, card, tasks=tasks if card.path or args.card else None, started=started)
+    card = resolve_card(args.card)
 
     if dataset:
+        if _uses_api(args):
+            return _run_dataset_api(args, card,
+                                    single=bool(args.text_file or args.html_file or args.url),
+                                    tasks=tasks, started=started)
         import io
         from contextlib import redirect_stdout, nullcontext
         output = io.StringIO()
@@ -1522,6 +2095,10 @@ def cmd_selftest(args) -> int:
         bad: set[str] = set()
         for m in re.finditer(r"clip2table[ \t]+([a-z][a-z0-9-]*)(?:[ \t]+([a-z][a-z0-9-]*))?", text):
             first, second = m.group(1), m.group(2)
+            # `from clip2table import api` is Python, not a command line. The
+            # doc has to show both, so the same word appears in both roles.
+            if text[max(0, m.start() - 5):m.start()].endswith("from "):
+                continue
             if first in ("csv", "md", "jsonl", "xlsx"):
                 continue                     # bare filenames, not commands
             used.add(first)
@@ -1753,6 +2330,12 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_test(args)
         if args.cmd == "task":
             return cmd_task(args)
+        if args.cmd == "rev":
+            return cmd_rev(args)
+        if args.cmd == "replay":
+            return cmd_replay(args)
+        if args.cmd == "ledger":
+            return cmd_ledger(args)
         if args.cmd == "doctor":
             return cmd_doctor(args)
         if args.cmd == "selftest":
@@ -1763,6 +2346,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"✗ {e.message}", file=sys.stderr)
         if e.hint:
             print(f"  {e.hint}", file=sys.stderr)
+        if e.reason:
+            # The same token a program gets in OperationResult.reason. Printed
+            # rather than parsed by us: it is for the caller's log, so a person
+            # reading a failed run can see which action the tool thought it
+            # needed instead of inferring it from the Chinese above.
+            print(f"  需要你处理：{e.reason}", file=sys.stderr)
         return e.exit_code
     except KeyboardInterrupt:
         print("\n已中断", file=sys.stderr)

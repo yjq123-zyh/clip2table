@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .errors import InputError
@@ -84,13 +85,18 @@ class Committer:
     site has to remember to check.
     """
 
-    def __init__(self, ds, card_name: str):
+    def __init__(self, ds, card_name: str, publisher=None):
         self.ds = ds
         self.card_name = card_name
         self.totals = Totals()
+        # Only present on a v2 dataset. `pages/` stays v1 either way: the two
+        # layouts are written side by side and neither one reads the other, so
+        # an old dataset never has to grow new files it does not understand.
+        self.publisher = publisher
 
     def page(self, page: int, raw: str, meta: dict[str, Any],
-             res: ParseResult, append_from_here: bool = False):
+             res: ParseResult, append_from_here: bool = False,
+             captured=None):
         """Publish one page, then advance the resume position.
 
         Order is enforced by `Dataset.commit_page`: nothing outside `pages/`
@@ -115,6 +121,12 @@ class Committer:
         if commit.published:
             self.totals.record_outcome(commit.outcome)
             self._report_collisions(page, commit.outcome)
+        if self.publisher is not None and captured is not None:
+            # Published after the v1 commit so a v2 object is never the only
+            # record of a page the table does not contain. `res` may be the page
+            # result or the whole merged table depending on the caller, so the
+            # publisher gets the page's own result only when it is one.
+            self.publisher.page(page, captured, res)
         return commit
 
     def _report_collisions(self, page: int, outcome) -> None:
@@ -154,7 +166,9 @@ def open_dataset(args, card, channel: str | None = None, raw: str = ""):
         return None, 1, append_from_here
 
     from .dataset import dataset_from_card
+    from . import revisions
 
+    existed = Path(path).exists()
     ds = dataset_from_card(
         card, path,
         allow_card_change=bool(getattr(args, "allow_card_change", False)))
@@ -169,6 +183,20 @@ def open_dataset(args, card, channel: str | None = None, raw: str = ""):
             f"这段原文已经作为第 {same} 页提交过了，再提交一次不会增加任何记录",
             hint=f"要看已有的表：clip2table export -d {path} -f csv")
 
+    publisher = None
+    if not existed:
+        # A directory this run creates is v2 from birth. Creating it as v1 and
+        # "upgrading later" would mean the first collection -- the one a user
+        # is most likely to redo after fixing a rule -- is the one that cannot
+        # be replayed, which is backwards. Existing v1 directories are left
+        # exactly as they are: adopting them is an explicit operation.
+        revisions.init(path)
+    if revisions.layout_of(path) == 2:
+        run = revisions.new_run(path, task=card.name, kind="collect",
+                                base_revision=revisions.active(path).get("revision_id"))
+        publisher = revisions.Publisher(path, card, run=run,
+                                        base_revision=run.base_revision)
+
     if raw:
         # The caller handed us the text itself, so there is no interface position
         # to be wrong about: this page's content is known exactly, and the only
@@ -179,7 +207,7 @@ def open_dataset(args, card, channel: str | None = None, raw: str = ""):
         if start_page > 1:
             print(f"续采：这段文本作为第 {start_page} 页追加"
                   f"（已有 {len(ds.rows)} 行）", file=sys.stderr)
-        return Committer(ds, card.name), start_page, append_from_here
+        return Committer(ds, card.name, publisher), start_page, append_from_here
 
     start_page = 1
     from .harvest import can_restore
@@ -201,7 +229,19 @@ def open_dataset(args, card, channel: str | None = None, raw: str = ""):
         start_page = int(ds.state.get("pages_done") or 0) + 1
         print(f"按「从当前屏幕接着采」处理：已提交到第 {start_page - 1} 页，"
               f"这一段从第 {start_page} 页记", file=sys.stderr)
-    return Committer(ds, card.name), start_page, append_from_here
+    return Committer(ds, card.name, publisher), start_page, append_from_here
+
+
+def finish(committer, reason: str = "", note: str = ""):
+    """Close a run: publish its revision (v2) or do nothing (v1 / preview).
+
+    Called once per command, after the last page. Without it the captures and
+    parses on disk would be unreferenced -- collected evidence that no revision
+    points at, which reads as "nothing happened" to every later reader.
+    """
+    if committer is None or committer.publisher is None:
+        return None
+    return committer.publisher.publish(reason=reason, note=note)
 
 
 def run_report_fields(ds, totals: Totals, dry_run: bool) -> dict[str, Any]:

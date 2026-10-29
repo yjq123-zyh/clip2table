@@ -266,6 +266,71 @@ class TestWizard(unittest.TestCase):
             self.assertEqual(card.name, ans.name)
 
 
+class TestConvertingACardKeepsWhatItAlreadySaid(unittest.TestCase):
+    """`task new -p` 是加任务元数据，不是重写这张卡.
+
+    The conversion used to rebuild the `[task]` block from the inference, so
+    `--yes` replaced a hand-written purpose and source with an empty string and
+    a guess, and the `[ledger]` section was not carried at all. Nothing failed:
+    the converted card produced the same rows and then read them as "whatever we
+    saw last wins", which is the failure the ledger section exists to stop.
+    """
+
+    def _card(self):
+        return parse_card({
+            "schema": 1, "name": "orders", "channel": "desktop",
+            "task": {"title": "订单台账", "purpose": "整理成能核对的台账",
+                     "source": "订单后台 → 订单列表", "created": "2026-10-25"},
+            "segment": {"mode": "lines"},
+            "fields": {"订单号": {"kind": "cell", "col": 0},
+                       "状态": {"kind": "cell", "col": 1},
+                       "更新时间": {"kind": "cell", "col": 2}},
+            "dedupe": {"key": ["订单号"], "mutable": ["状态", "更新时间"]},
+            "ledger": {"sort": "business_time", "field": "更新时间",
+                       "timezone": "Asia/Shanghai"},
+        })
+
+    def _convert(self, card):
+        cap = Captured(kind="text", payload="A1\t待付款\t2026-03-10 09:00",
+                       channel="file")
+        res, inf = parse_capture(cap, card)
+        with redirect_stdout(io.StringIO()):
+            answers = taskflow.build_answers(
+                res, inf, cap, argparse.Namespace(yes=True), card)
+        return parse_card(tomllib.loads(taskflow.render_task_card(answers)))
+
+    def test_the_purpose_and_source_survive_yes(self):
+        saved = self._convert(self._card())
+        self.assertEqual(saved.task.get("purpose"), "整理成能核对的台账")
+        self.assertEqual(saved.task.get("source"), "订单后台 → 订单列表")
+        self.assertEqual(saved.task.get("title"), "订单台账")
+
+    def test_the_date_the_task_started_is_not_restamped(self):
+        saved = self._convert(self._card())
+        self.assertEqual(saved.task.get("created"), "2026-10-25")
+
+    def test_the_ledger_rule_survives(self):
+        saved = self._convert(self._card())
+        self.assertEqual(saved.ledger_sort, "business_time")
+        self.assertEqual(saved.ledger_sort_field, "更新时间")
+        self.assertEqual(saved.ledger.get("timezone"), "Asia/Shanghai")
+
+    def test_a_card_without_a_ledger_still_converts_without_one(self):
+        card = self._card()
+        card.ledger = {}
+        saved = self._convert(card)
+        self.assertEqual(saved.ledger, {})
+
+    def test_key_types_survive_the_round_trip(self):
+        # `key_types` decides whether "0012" and "12" are the same order. It is
+        # written as an inline table, which is the one part of `[ledger]` that
+        # a hand-rolled writer can silently mangle into invalid TOML.
+        card = self._card()
+        card.ledger["key_types"] = {"订单号": "int"}
+        saved = self._convert(card)
+        self.assertEqual(saved.ledger.get("key_types"), {"订单号": "int"})
+
+
 class TestFix(unittest.TestCase):
     """一次修正可以预览整批并保存."""
 

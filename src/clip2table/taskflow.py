@@ -65,6 +65,16 @@ class Answers:
     # Why there is no `[paging]` when the user asked for more than one page.
     # Silence there reads as "it will page by itself", which it will not.
     paging_note: str = ""
+    # `[ledger]`: how to read these rows as a ledger over time. Carried over
+    # verbatim when converting a card. Dropping it made the converted copy a
+    # card that produced the same table but read it as "whatever we saw last
+    # wins", so every late-arriving old row silently overwrote a newer one --
+    # the exact failure the section exists to prevent, reintroduced by an edit
+    # that only meant to add a title.
+    ledger: dict[str, Any] = field(default_factory=dict)
+    # `[task].created`: the day the task started. A re-conversion is not a new
+    # task, so this is carried over rather than restamped.
+    created: str = ""
 
 
 def _ask(prompt: str, default: str = "", *, assume: bool) -> str:
@@ -167,14 +177,23 @@ def build_answers(res: ParseResult, inf, cap, args, card=None,
     print(grid(res, limit=int(getattr(args, "rows", 5) or 5)).render())
     print()
 
-    title = _ask(f"这个任务叫什么（中文描述）？ ", f"{level} 任务", assume=assume)
-    purpose = _ask("它要产出什么，给谁看？ ", "", assume=assume)
+    # Converting a card: the answers default to what the card already says.
+    # They used to default to the inference instead, so `--yes` (and any user
+    # who pressed Enter) replaced a purpose and a source sentence written by
+    # hand with an empty string and a guess about the clipboard. Nothing
+    # errored -- the card just quietly lost the part that explains it.
+    old_task = card.task if card is not None else {}
+    title = _ask(f"这个任务叫什么（中文描述）？ ",
+                 str(old_task.get("title") or f"{level} 任务"), assume=assume)
+    purpose = _ask("它要产出什么，给谁看？ ",
+                   str(old_task.get("purpose") or ""), assume=assume)
     # The sentence a person writes here is for them. The part that makes the
     # task runnable is derived, and shown so a "task" that can only read the
     # clipboard says so at the moment it is created rather than on page two.
     plan = source_plan(cap, card)
     source = _ask("数据来自哪里（下次你还要回到这个页面）？ ",
-                  plan or _source_hint(cap), assume=assume)
+                  str(old_task.get("source") or plan or _source_hint(cap)),
+                  assume=assume)
 
     print("\n每个字段的名字会变成导出表头，现在改比以后改省事：")
     fields = _ask_fields(res, specs, assume)
@@ -237,6 +256,10 @@ def build_answers(res: ParseResult, inf, cap, args, card=None,
         renamed = {old.name: new.name for old, new in zip(specs, fields)}
         required = [renamed[r] for r in card.required if r in renamed]
 
+    # `[ledger]` is carried verbatim, for the same reason the rules are: it is a
+    # statement about the business ("the state with the latest 更新时间 wins"),
+    # not something the wizard can infer from one sample. `created` comes along
+    # too -- re-converting an existing task is not the day it started.
     return Answers(
         name=name, title=title or name, purpose=purpose, source=source,
         channel=chan, fields=fields,
@@ -252,7 +275,9 @@ def build_answers(res: ParseResult, inf, cap, args, card=None,
         record_lines=(card.record_lines if card is not None else None),
         fetch=fetch, target=target, harvest=harvest_s, paging=paging,
         samples=(card.samples if card is not None else None),
-        paging_note=note)
+        paging_note=note,
+        ledger=(dict(card.ledger) if card is not None else {}),
+        created=str(old_task.get("created") or ""))
 
 
 def _configure_source(args, channel, fetch, target, paging, *, assume):
@@ -554,6 +579,11 @@ def render_task_card(a: Answers) -> str:
         lines.append(f"purpose = {_toml_key_str(a.purpose)}")
     if a.source:
         lines.append(f"source  = {_toml_key_str(a.source)}")
+    if getattr(a, "created", ""):
+        # The day the task started, not the day it was last edited. A
+        # re-conversion that resets this silently makes "how long has this
+        # been running" start over.
+        lines.append(f"created = {_toml_key_str(a.created)}")
     if a.expected:
         if len(a.expected) == 1:
             lines.append(f"expected = {_toml_key_str(a.expected[0])}")
@@ -628,6 +658,21 @@ def render_task_card(a: Answers) -> str:
             lines.append("identity = " + _toml_value(a.identity))
         if a.mutable:
             lines.append("mutable = " + _toml_value(a.mutable))
+        lines.append("")
+    if a.ledger:
+        # Written after `[dedupe]` because that is the order the card is read
+        # in: the ledger reads the deduped rows, so seeing the rule that
+        # identifies an entity before the rule that orders its versions is the
+        # order they act in.
+        lines.append("[ledger]")
+        for k in ("sort", "field", "timezone"):
+            if a.ledger.get(k):
+                lines.append(f"{k} = {_toml_value(a.ledger[k])}")
+        kt = a.ledger.get("key_types") or {}
+        if kt:
+            inner = ", ".join(f"{_toml_key(k)} = {_toml_value(v)}"
+                              for k, v in kt.items())
+            lines.append(f"key_types = {{ {inner} }}")
         lines.append("")
     return "\n".join(lines)
 

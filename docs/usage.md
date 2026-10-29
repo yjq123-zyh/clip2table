@@ -56,7 +56,7 @@ clip2table doctor
 |---|---|---|---|
 | `http` | HTTP 直连 | 服务端就渲染好了 | 无 |
 | `browser` | E1：CDP 发真 Ctrl+A / Ctrl+C | 要登录、要 JS、有反爬 | 窗口只是被盖住时不动你的前台；浏览器被最小化时要短暂借前台，采完归还 |
-| `desktop` | E2：Win32 `SendInput` | Windows 客户端、Excel、记事本 | 需要前台焦点（见 §10 安全边界） |
+| `desktop` | E2：Win32 `SendInput` | Windows 客户端、Excel、记事本 | 需要前台焦点（见 §11 安全边界） |
 
 不指定时自动降级：先试直连（2 秒超时），被挡就驱动已登录的浏览器，还不行就驱动前台窗口。
 `--channel` 可以钉死某一条，钉死时不降级。
@@ -135,7 +135,9 @@ clip2table task new --text-file page.txt --channel desktop --source '订单管�
 `--source` 保存再次采集的目标；`--url` 用于立即读取样本。浏览器按钮翻页从当前页面开始，
 重跑前切回第一页；页码 URL 会自动定位并逐页导航。`--yes` 配合文件样本且未提供来源时，
 生成用于文件导入的规则卡，运行时继续提供 `--text-file` 或 `--html-file`。
-复合去重键用逗号分隔，输入 `-` 关闭去重。转换已有卡时保留冲突策略及身份、可变字段定义。
+复合去重键用逗号分隔，输入 `-` 关闭去重。转换已有卡（`task new -p <卡>`）是给这张卡补任务
+元数据，不是重写它：冲突策略、身份与可变字段、标题/用途/来源/创建日期，以及 `[ledger]` 段都
+原样带过去。
 
 ### 第三步：预览，确认每个字段来自原文哪一行
 
@@ -297,11 +299,14 @@ clip2table test mycard.toml             # 卡的规则对不对：拿样本逐�
 
 ```bash
 clip2table harvest -p card.toml -d data/mysite --max-pages 5
-# 明天接着采
+# 明天采一轮新的观察
 clip2table harvest -p card.toml -d data/mysite --max-pages 5
 # 任意时候重出
 clip2table export -d data/mysite -f csv -f xlsx --dir out
 ```
+
+新建数据集使用结果版本布局，独立采集与恢复的用法见第 10 节。
+本节以下 pages/state 提交与续采规则适用于已有旧布局数据集。
 
 ### 以「页」为提交单位
 
@@ -460,7 +465,189 @@ clip2table task fix corrected.toml --field 金额 --value '¥100.00' --text-file
 
 ---
 
-## 10. 安全边界（desktop 通道）
+## 10. 结果版本、持续台账与恢复
+
+### 新采集、重试和恢复
+
+| 操作 | 命令或入口 | 数据变化 |
+|---|---|---|
+| 新一次采集 | `task run -d 目录` | 创建新 run，从来源第一页开始，追加观察 |
+| 重试同一请求 | 原命令加相同 `--request-id` | 输入相同时返回原结果 |
+| 继续未完成操作 | `task run -d 目录 --resume <operation_id 或 run_id>` | 继续原操作和原 run，复用冻结配置与已保存内容 |
+| 改规则重算 | `replay -d 目录 -p edited.toml` | 同一捕获生成新解析，形成候选版本 |
+| 导出 | `ledger -d 目录 -f xlsx -o …` | 固定结果版本、策略和人工决定，生成文件 |
+
+页号在每个 run 内从 1 开始。两次独立运行的第 1 页各自保留；内容相同也保留两次观察的时间与来源。台账按业务主键归并实体，history 保留观察明细。
+
+指定请求标识后，可以重复提交同一条命令：
+
+```powershell
+clip2table task run -p orders.toml -d out/orders --yes --request-id orders-20261028 --json
+```
+
+同一标识绑定实际规则、来源配置和文件内容；输入改变时返回 request_conflict。
+再次采集使用新的请求标识；省略时工具自动生成，结果中返回 request_id。
+
+中断或失败后使用结果中的 operation_id 或 run_id 恢复：
+
+```powershell
+clip2table task run -d out/orders --resume run-xxxx --request-id orders-continue --json
+```
+
+恢复使用原运行保存的卡片和采集配置，原卡片文件移动、删除或修改都不改变这次运行。任务统计按 run_id 更新，恢复和同请求重试不会增加采集次数。
+
+结果中的 pages/rows 是原运行已提交总量，captured_pages 是已保存原文数，this_request_pages/rows 是本次调用新增提交，dataset_rows 是当前台账规模。
+
+遇到登录、验证或位置确认时，先完成来源页面上的操作，再创建回答文件。checkpoint 和 action_id 从最近的结果复制：
+
+```json
+{
+  "checkpoint": {"operation_id": "op-xxxx", "generation": 1},
+  "action_response": {"action_id": "action-xxxx", "confirmed": true}
+}
+```
+
+```powershell
+clip2table task run -d out/orders --resume op-xxxx --answer answer.json --request-id orders-after-verification --json
+```
+
+回答文件使用 UTF-8。目标选择动作需按候选列表提供 target_id；桌面和纯点击翻页续采需把来源定位到检查点的下一页。工具会核对动作归属和检查点代次，过期回答返回明确错误。
+
+### 重解析与版本选择
+
+```powershell
+clip2table replay -d out/orders
+clip2table replay -d out/orders -p edited.toml --show 10
+clip2table rev list -d out/orders
+clip2table rev show v-xxxx -d out/orders --json
+clip2table rev select v-xxxx -d out/orders --expect v-baseline
+```
+
+重解析保留完整捕获集合，只替换指定捕获的解析引用。候选中保存字段变化、原文坐标、边界变化和逐捕获失败清单。失败页沿用旧解析供查看，operation_complete 为 false，修复后可通过 API resume 继续失败部分。
+
+版本分别记录引用完整性、范围覆盖、操作完成和解析质量。行数守恒只是一项质量检查。
+本次目标范围未处理完成的候选不能启用；`--allow-incomplete` 只允许显式接受质量不完整，不能把处理失败标成完成。
+
+重解析默认生成候选；差异确认后可选择，也可在 replay 中加 `--select`。
+无业务主键时，比较使用同一捕获中完整的原文行坐标；重复键和拆分/合并歧义分别列出。
+
+### 四种台账视图
+
+```powershell
+clip2table ledger -d out/orders --view current
+clip2table ledger -d out/orders --view changes --baseline v-baseline
+clip2table ledger -d out/orders --view history
+clip2table ledger -d out/orders --view pending
+clip2table ledger -d out/orders --view current -f xlsx -o out/current.xlsx
+```
+
+current 每个已确定实体一行；history 每次观察一行；changes 给出相对明确基线的新增、更新和待处理项；pending 保存冲突候选。变化统计按实体计数，导出明细按字段展开。未变化单独计数。
+
+卡片声明排序和允许变化的字段：
+
+```toml
+[dedupe]
+key = ['订单号']
+identity = ['客户']
+mutable = ['状态', '更新时间']
+
+[ledger]
+sort = "business_time"
+field = '更新时间'
+timezone = "Asia/Shanghai"
+```
+
+排序支持业务时间 business_time、业务版本 business_version 和显式的观察时间 observed。
+旧业务版本晚到留在历史中；未再次出现的订单继续保留已知当前值。
+
+| 情况 | 处理 |
+|---|---|
+| 排序值相同但内容不同 | 保留已经接受的当前值，候选进入 pending |
+| 身份字段变化 | 保留原身份，展示冲突候选 |
+| 未声明可变的字段变化 | 进入 pending，附字段差异 |
+| 排序值缺失或无效 | 保留候选；已有确定当前值继续可查 |
+| 主键缺失或类型不符 | 单独保留待处理来源记录 |
+
+主键 text 保留前导零；声明 int/float 时按精确数值归并。复合键保存各部分边界。
+业务时间按声明时区比较，无法解释的时间值进入待处理。
+
+人工选择候选后，决定追加保存，新的视图引用固定决定集合。相同冲突重复出现会追加来源；新候选或规则变化使原决定不再适用时，重新进入待处理。
+
+### 旧数据的查看和采用
+
+旧 pages/state 数据集继续使用原读取路径。查看原文和类型是否完整：
+
+```powershell
+clip2table rev legacy -d old/orders
+clip2table rev adopt -d out/adopted --source old/orders 1 --kind text
+```
+
+采用后返回候选版本，再使用 rev select 显式选择。--source 和目标 -d 使用不同目录，源目录保留原样。后续采用更多页面时先选择已有候选，再追加下一页。
+
+没有原文的旧页也可保留其已有行；捕获类型、原观察时间及解析器等缺失信息标记为未知。缺少原文的页面重算会列出明确原因。旧 rule_id 继续可读，新规则身份仅由影响解析的配置决定，台账策略另存。
+
+### Python 接口
+
+```python
+from clip2table import api
+from clip2table.cards.loader import resolve_card
+
+result = api.execute(
+    api.ExecuteRequest(
+        request_id="orders-20261028",
+        dataset="out/orders",
+        text_file="page-1.txt",
+    ),
+    resolve_card("orders.toml"),
+)
+print(result.status, result.counts, result.operation_id)
+```
+
+传入 Card 对象或请求中的 card 路径均可；实际规则内容参与请求摘要。
+preview 返回样本及候选结构，不创建业务运行。普通输入和通道错误返回 failed 与稳定 error.code；
+status 使用 completed / needs_action / failed / cancelled，reason 和 action 描述下一步。
+
+来源操作完成后继续原操作：
+
+```python
+continued = api.resume(api.ResumeRequest(
+    request_id="orders-continue",
+    dataset="out/orders",
+    operation_id=result.operation_id,
+    checkpoint=result.checkpoint,
+    action_response={"action_id": result.action["action_id"], "confirmed": True},
+))
+```
+
+重启后用 operation_status 读取最新检查点与动作，再提交回答：
+
+```python
+status = api.operation_status(api.ResumeRequest(
+    dataset="out/orders", operation_id="op-xxxx"
+))
+```
+
+人工处理 pending 时，先读取候选并创建动作：
+
+```python
+rows, fields, view = api.ledger_view("out/orders", view="pending")
+item = view.pending[0]
+action = api.resolve(
+    api.Request(dataset="out/orders", request_id="review-order"),
+    pending_id=item.pending_id,
+)
+print(action.action["candidates"])
+```
+
+选定候选后，通过 resume 提交 action_response，其中 candidate 为该候选的 candidate_id，或 keep_pending。checkpoint 和 action_id 使用本次 action 返回值。
+
+execute / resume / reparse / select_revision / export 共用请求登记、写锁与持久化回执。
+请求已完成时重试返回原结果；已返回失败清单后继续处理，使用新的 request_id 关联原 operation_id 和 checkpoint。
+导出固定版本、策略及决定集合，返回文件摘要、格式损失说明和完整值伴随文件位置。
+
+---
+
+## 11. 安全边界（desktop 通道）
 
 E2 是用操作系统的按键通道往窗口里发键，**它能造成真实后果**。所以它有三道闸：
 
@@ -478,7 +665,7 @@ E2 是用操作系统的按键通道往窗口里发键，**它能造成真实后
 
 ---
 
-## 11. 使用条件
+## 12. 使用条件
 
 采集对象需要提供可选中、可复制的文本，适用于用户已登录的页面、桌面客户端列表、
 Excel 选中区域和本地文本窗口。
@@ -488,7 +675,7 @@ Excel 选中区域和本地文本窗口。
 
 ---
 
-## 12. 数据处理
+## 13. 数据处理
 
 源文本按归属记录到解析结果或未识别清单，报告统计两者占用的源行数。
 未识别内容随导出结果保存为同名 `.unparsed.txt` 文件。
@@ -500,7 +687,7 @@ Excel 选中区域和本地文本窗口。
 
 ---
 
-## 13. 开发
+## 14. 开发
 
 ```bash
 python -m unittest discover -s tests -t .     # 全量
