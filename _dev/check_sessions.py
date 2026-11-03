@@ -48,7 +48,7 @@ def browser():
         startup.wShowWindow = 0
         url = f"http://127.0.0.1:{server.server_port}/notices?page=1"
         process = subprocess.Popen([found[1], "--headless=new", f"--remote-debugging-port={port}",
-            "--no-first-run", f"--user-data-dir={directory}/profile", url], startupinfo=startup,
+            "--no-first-run", "--disable-background-mode", f"--user-data-dir={directory}/profile", url], startupinfo=startup,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             deadline = time.monotonic() + 20
@@ -77,14 +77,10 @@ def browser():
             assert all(c.meta.get("tab_id") for c in captures)
             return {"backend": found[0], "pages": result.counts["pages"], "entities": len(rows)}
         finally:
-            try:
-                client, _ = cdp.connect(port)
-                client.call("Browser.close")
-                client.close()
-            except (ChannelError, cdp.CDPError, OSError):
-                pass
             if process.poll() is None:
-                process.terminate()
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    creationflags=subprocess.CREATE_NO_WINDOW, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, check=False)
                 process.wait(timeout=10)
             server.shutdown()
             server.server_close()

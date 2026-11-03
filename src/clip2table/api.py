@@ -251,16 +251,40 @@ def _fingerprint(operation, req, card=None, policy=None, extra=None) -> str:
         content["policy"] = policy.as_dict()
     migration = revisions.dataset_meta(req.dataset).get("migration", {}) if req.dataset else {}
     if migration:
-        target, source = migration["target"], migration["source"]
-        def original(value):
-            if isinstance(value, str) and (value == target or value.startswith(target + "\\") or value.startswith(target + "/")):
-                return source + value[len(target):]
-            if isinstance(value, dict):
-                return {key: original(item) for key, item in value.items()}
-            if isinstance(value, list):
-                return [original(item) for item in value]
-            return value
-        body = original(body)
+        import itertools
+        targets = {migration["target"], str(req.dataset), *migration.get("target_aliases", [])}
+        sources = {migration["source"], *migration.get("source_aliases", [])}
+        choices = {}
+        for key in ("dataset", "text_file", "html_file", "json_file", "card", "out"):
+            value = body.get(key)
+            if not value:
+                continue
+            normalized = os.path.normcase(value.replace("/", "\\")) if os.name == "nt" else value
+            for target in sorted(targets, key=len, reverse=True):
+                prefix = os.path.normcase(target.replace("/", "\\")) if os.name == "nt" else target
+                if normalized == prefix or normalized.startswith(prefix + os.sep):
+                    alternatives = {source + value[len(target):] for source in sources}
+                    if os.name == "nt":
+                        alternatives |= {path.replace("\\", "/") for path in alternatives}
+                        alternatives |= {path.replace("/", "\\") for path in alternatives}
+                    choices[key] = sorted(alternatives)
+                    break
+        expected = revisions._load(_receipt_path(Path(req.dataset), req.request_id), {}).get("fingerprint")
+        if expected is None:
+            oid = getattr(req, "operation_id", "") or "op-" + _digest([operation, req.request_id])[:24]
+            state = revisions._load(_state_path(Path(req.dataset), oid), {})
+            expected = state.get("bindings", {}).get(req.request_id)
+        primary = None
+        for values in itertools.product(*choices.values()):
+            candidate = dict(body, **dict(zip(choices, values)))
+            identity = _digest([operation, candidate, content, extra or {}])
+            primary = primary or identity
+            if expected is None:
+                return identity
+            if identity == expected:
+                return identity
+        if primary:
+            return primary
     return _digest([operation, body, content, extra or {}])
 
 

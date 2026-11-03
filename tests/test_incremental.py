@@ -1,5 +1,6 @@
 """Incremental publication, bounded queries and recoverable indexed export."""
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -111,6 +112,21 @@ class TestIncremental(unittest.TestCase):
         self.assertEqual(len(seen), 250)
         with zipfile.ZipFile(path) as archive:
             self.assertIn(b'A1:A251', archive.read("xl/worksheets/sheet1.xml"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows path aliases")
+    def test_adoption_preserves_request_with_different_path_spelling(self):
+        self.card.segment_path = "/missing"
+        payload = '{"data":{"orders":[{"id":1,"amount":"10"}]}}'
+        first = api.execute(api.ExecuteRequest(dataset=str(self.root).upper(), request_id="alias",
+            capture={"kind": "json", "payload": payload}), self.card)
+        target = Path(self.temp.name) / "adopted"
+        R.adopt_dataset(self.root, target)
+        repeated = api.execute(api.ExecuteRequest(dataset=str(target).upper().replace("\\", "/"),
+            request_id="alias", capture={"kind": "json", "payload": payload}), self.card)
+        self.assertEqual(repeated.operation_id, first.operation_id, repeated.to_json())
+        changed = api.execute(api.ExecuteRequest(dataset=str(target), request_id="alias",
+            capture={"kind": "json", "payload": payload.replace('"10"', '"20"')}), self.card)
+        self.assertEqual(changed.error["code"], "request_conflict")
 
     def test_publication_crash_reuses_immutable_objects(self):
         for kind in ("capture", "parse", "revision", "selection"):

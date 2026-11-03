@@ -50,13 +50,13 @@ clip2table 从网页、桌面应用、剪贴板和本地文件提取文本、JSO
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/yjq123-zyh/clip2table/releases/latest) 下载 Python 安装包，或直接安装 `v0.4.0`：
+从 [GitHub Releases](https://github.com/yjq123-zyh/clip2table/releases/latest) 下载 Python 安装包，或直接安装 `v0.4.1`：
 
 ```powershell
-python -m pip install --upgrade clip2table==0.4.0
+python -m pip install --upgrade clip2table==0.4.1
 ```
 
-也可以下载 [v0.4.0 wheel](https://github.com/yjq123-zyh/clip2table/releases/download/v0.4.0/clip2table-0.4.0-py3-none-any.whl)。
+也可以下载 [v0.4.1 wheel](https://github.com/yjq123-zyh/clip2table/releases/download/v0.4.1/clip2table-0.4.1-py3-none-any.whl)。
 
 从源码安装：
 

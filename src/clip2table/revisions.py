@@ -942,7 +942,11 @@ def active_token(root: str | Path) -> dict[str, Any]:
 def adopt_dataset(source: str | Path, target: str | Path):
     """Adopt a versioned dataset into a separate incremental directory."""
     import shutil
+    source_aliases = {str(source)}
+    target_aliases = {str(target)}
     source, target = Path(source).resolve(), Path(target).resolve()
+    source_aliases.add(str(source))
+    target_aliases.add(str(target))
     if source == target or source in target.parents or target in source.parents:
         raise InputError("源目录和目标目录需要各自独立")
     if layout_of(source) not in (2, 3):
@@ -951,18 +955,26 @@ def adopt_dataset(source: str | Path, target: str | Path):
         raise InputError("目标目录需要为空")
     target.mkdir(parents=True, exist_ok=True)
     def remap(value):
-        if isinstance(value, str) and (value == str(source) or value.startswith(str(source) + "\\") or value.startswith(str(source) + "/")):
-            destination = Path(str(target) + value[len(str(source)):])
-            if Path(value).is_file() and not destination.exists():
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(value, destination)
-            return str(destination)
+        if isinstance(value, str):
+            normalized = os.path.normcase(value.replace("/", "\\")) if os.name == "nt" else value
+            for alias in sorted(source_aliases, key=len, reverse=True):
+                prefix = os.path.normcase(alias.replace("/", "\\")) if os.name == "nt" else alias
+                if normalized == prefix or normalized.startswith(prefix + os.sep):
+                    destination = Path(str(target) + value[len(alias):])
+                    if Path(value).is_file() and not destination.exists():
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(value, destination)
+                    return str(destination)
         if isinstance(value, dict):
             return {key: remap(item) for key, item in value.items()}
         if isinstance(value, list):
             return [remap(item) for item in value]
         return value
     with writer(source), writer(target):
+        for file in (source / "operation-state").glob("*.json"):
+            request = _load(file, {}).get("request", {})
+            if request.get("dataset"):
+                source_aliases.add(request["dataset"])
         for name in (CAPTURES, PARSES, RULES, REVISIONS, RUNS, "operation-state", "operations", "decisions", "events"):
             src = source / name
             if src.exists():
@@ -984,7 +996,9 @@ def adopt_dataset(source: str | Path, target: str | Path):
                 _dump(body, file)
         meta = dataset_meta(target)
         original = meta.get("migration", {}).get("source", str(source))
-        meta.update(layout=3, migration={"source": original, "target": str(target), "adopted_at": _now()})
+        aliases = set(meta.get("migration", {}).get("source_aliases", [])) | source_aliases
+        meta.update(layout=3, migration={"source": original, "target": str(target), "adopted_at": _now(),
+                    "source_aliases": sorted(aliases), "target_aliases": sorted(target_aliases)})
         _dump(meta, target / DATASET_JSON)
         for file in (target / RUNS).glob("*.json"):
             run = RunRecord.from_dict(_load(file, {}))
