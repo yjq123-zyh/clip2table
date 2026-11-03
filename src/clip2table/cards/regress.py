@@ -32,7 +32,7 @@ from ..errors import InputError
 from ..models import Captured
 from .schema import Card
 
-INPUT_SUFFIXES = (".txt", ".html", ".htm")
+INPUT_SUFFIXES = (".txt", ".html", ".htm", ".json")
 EXPECT_SUFFIX = ".expect.tsv"
 
 
@@ -149,7 +149,7 @@ def test_card(card: Card) -> CardTestReport:
             res.problems.append(f"缺期望文件 {expect.name}")
             continue
 
-        kind = "html" if src.suffix.lower() in (".html", ".htm") else "text"
+        kind = "json" if src.suffix.lower() == ".json" else "html" if src.suffix.lower() in (".html", ".htm") else "text"
         cap = Captured(kind=kind,
                        payload=src.read_text(encoding="utf-8", errors="replace"),
                        channel="file", formats=["file"])
@@ -182,3 +182,76 @@ def test_card(card: Card) -> CardTestReport:
         if res.failures or res.problems:
             res.ok = False
     return rep
+
+
+def scene_path(name):
+    import sysconfig
+    if name.startswith("scene:"):
+        relative = Path(name[6:]) / "scene.toml"
+        bases = [Path(__file__).resolve().parents[3] / "scenes",
+                 Path(sysconfig.get_path("data")) / "share" / "clip2table" / "scenes"]
+        for base in bases:
+            if (base / relative).is_file():
+                return base / relative
+        raise InputError(f"找不到场景包：{name}")
+    return Path(name)
+
+
+def test_scene(path):
+    import csv
+    import tempfile
+    import tomllib
+    from .. import __version__, api
+    from ..capabilities import CAPABILITIES
+    from .loader import resolve_card
+    path = scene_path(str(path)).resolve()
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    required = {"schema", "id", "version", "maintainer", "min_clip2table", "card_schema", "capabilities", "cards", "samples"}
+    if required - data.keys() or data["schema"] != 1:
+        raise InputError("场景清单需要完整的标识、兼容信息、卡片和样本")
+    version = lambda value: tuple(int(part) for part in value.split("."))
+    if version(__version__) < version(data["min_clip2table"]):
+        raise InputError(f"场景包需要 clip2table ≥{data['min_clip2table']}")
+    if set(data["capabilities"]) - CAPABILITIES.keys():
+        raise InputError("场景包声明了未知字段能力")
+    def local(name):
+        target = (path.parent / name).resolve()
+        if not target.is_relative_to(path.parent) or not target.is_file():
+            raise InputError(f"场景文件不可用：{name}")
+        return target
+    for name in data["cards"]:
+        card = resolve_card(str(local(name)))
+        if card.schema not in data["card_schema"]:
+            raise InputError(f"场景卡片格式未声明：{name}")
+        if {field.kind for field in card.fields} - set(data["capabilities"]):
+            raise InputError(f"场景卡片使用了未声明的字段能力：{name}")
+    report = CardTestReport(data["id"], str(path.parent))
+    for sample in data["samples"]:
+        if sample["card"] not in data["cards"]:
+            raise InputError(f"样本卡片未列入场景清单：{sample['card']}")
+        result = SampleResult(path=Path(sample["name"]), ok=True)
+        report.results.append(result)
+        card = resolve_card(str(local(sample["card"])))
+        with tempfile.TemporaryDirectory(prefix="c2t-scene-") as directory:
+            dataset = Path(directory) / "dataset"
+            for n, name in enumerate(sample["inputs"]):
+                request = api.ExecuteRequest(dataset=str(dataset), request_id=f"sample-{n}",
+                    capture={"kind": sample["kind"], "payload": local(name).read_text(encoding="utf-8")})
+                answer = api.execute(request, card)
+                if not answer.ok:
+                    result.problems.append(answer.message)
+                    result.ok = False
+                    break
+            if not result.ok:
+                continue
+            rows, fields, _ = api.ledger_view(dataset, view=sample["view"])
+            with local(sample["expected"]).open(encoding="utf-8-sig", newline="") as stream:
+                expected = list(csv.reader(stream))
+            result.rows, result.expected_rows = len(rows), len(expected) - 1
+            if sample.get("pending_format") == "boolean":
+                rows = [dict(row, _pending="是" if row.get("_pending") else "") for row in rows]
+            actual = [fields] + [[str(row.get(name, "")) for name in fields] for row in rows]
+            if actual != expected:
+                result.ok = False
+                result.problems.append("结果字段、顺序或取值与独立答案不同")
+    return report

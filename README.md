@@ -1,6 +1,6 @@
 # clip2table
 
-clip2table 是一个面向 Windows 的文本转表格工具。它从网页、桌面应用、剪贴板或本地文件读取可复制的文本，识别记录和字段，导出 CSV、XLSX、JSONL 和 Markdown。
+clip2table 从网页、桌面应用、剪贴板和本地文件提取文本、JSON 与 HTML 数据，按规则整理表格，持续维护业务台账，导出 CSV、XLSX、JSONL 和 Markdown。
 
 [![Release](https://img.shields.io/github/v/release/yjq123-zyh/clip2table)](https://github.com/yjq123-zyh/clip2table/releases/latest)
 [![tests](https://github.com/yjq123-zyh/clip2table/actions/workflows/tests.yml/badge.svg)](https://github.com/yjq123-zyh/clip2table/actions/workflows/tests.yml)
@@ -16,6 +16,7 @@ clip2table 是一个面向 Windows 的文本转表格工具。它从网页、桌
 - **任务向导**：从样本配置字段、复合主键、采集来源与翻页，保存为可重复执行的任务。
 - **预览纠错**：定位字段来源、选择并保存分段、修正规则、确认样本，记录配置耗时与运行情况。
 - **规则卡片**：用 TOML 配置采集通道、记录边界、字段提取、去重和翻页。
+- **结构化提取**：从 JSON 对象数组或 HTML 重复容器提取字段，保存路径、属性和来源位置，支持离线重算。示例见 [使用说明](docs/usage.md#15-json-与-dom-结构提取)。
 - **批量采集**：支持分页、数据累积和按通道恢复采集位置。
 - **规则重放**：改规则后用保存的原文重新解析，不重新采集；差异定位到原文行，确认后再切换。
 - **台账视图**：按任务声明的业务时间取当前值，导出当前状态、变化、历史与待处理；旧版本晚到不覆盖新的，缺席不当作删除。
@@ -23,16 +24,18 @@ clip2table 是一个面向 Windows 的文本转表格工具。它从网页、桌
 - **运行恢复**：保存原运行配置和已提交进度；通过请求标识重试，或继续原运行并回答待处理动作。
 - **数据记录**：保存原文、字段来源、解析状态、重复记录和内容冲突。
 - **格式导出**：输出 CSV、XLSX、JSONL 和 Markdown，超长内容保存到配套文件。
+- **增量存储**：逐页提交，修订保存变化引用；索引按受影响实体更新，查询分页读取，导出逐行写出。
+- **场景包**：订单台账和公告列表包含任务卡、样本与独立答案，安装后可用 `clip2table test scene:order-ledger` 和 `clip2table test scene:notice-list` 运行。
 
 ## 工作方式
 
 | 通道 | 取得内容的方式 | 适用场景 |
 |---|---|---|
-| `http` | 直接请求网页 | 服务端生成的页面 |
-| `browser` | 通过 CDP 在浏览器中执行复制 | 使用现有登录会话的网页、动态列表 |
+| `http` | 请求 HTML、文本或 JSON | 服务端页面、JSON 接口 |
+| `browser` | 通过 CDP 复制文本或读取 DOM 快照 | 使用现有登录会话的网页、动态列表 |
 | `desktop` | 通过 Win32 按键复制窗口内容 | Windows 客户端、Excel、文本窗口 |
 
-也可以直接读取剪贴板或本地文本、HTML 文件。取得内容后，程序按以下流程处理：
+也可以直接读取剪贴板或本地文本、HTML、JSON 文件。取得内容后，程序按以下流程处理：
 
 ```text
 读取内容 → 识别结构 → 划分记录 → 提取字段 → 去重与保存 → 导出表格
@@ -47,13 +50,13 @@ clip2table 是一个面向 Windows 的文本转表格工具。它从网页、桌
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/yjq123-zyh/clip2table/releases/latest) 下载 Python 安装包，或直接安装 `v0.3.0`：
+从 [GitHub Releases](https://github.com/yjq123-zyh/clip2table/releases/latest) 下载 Python 安装包，或直接安装 `v0.4.0`：
 
 ```powershell
-python -m pip install --upgrade clip2table==0.3.0
+python -m pip install --upgrade clip2table==0.4.0
 ```
 
-也可以下载 [v0.3.0 wheel](https://github.com/yjq123-zyh/clip2table/releases/download/v0.3.0/clip2table-0.3.0-py3-none-any.whl)。
+也可以下载 [v0.4.0 wheel](https://github.com/yjq123-zyh/clip2table/releases/download/v0.4.0/clip2table-0.4.0-py3-none-any.whl)。
 
 从源码安装：
 

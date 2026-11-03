@@ -11,7 +11,11 @@ clip2table 是一个面向 Windows 的文本转表格工具。它从网页、桌
 读取可复制的文本，识别记录和字段，导出 CSV、XLSX、JSONL 和 Markdown。
 
 常见用途包括整理后台订单、公告列表、招聘信息、商品评价和本地台账。
-浏览器和桌面通道通过复制取得内容，HTTP 通道直接请求网页，随后进入同一套解析流程。
+浏览器通道复制文本或读取 DOM 快照，桌面通道复制窗口内容，HTTP 通道请求页面或 JSON，随后进入同一套解析流程。
+
+单次读取与分页共用通道会话。浏览器按页面就绪状态等待，超时返回
+`navigation_timeout`；卡片的 `[harvest].timeout_ms` 控制就绪与复制等待时限。
+按页码地址恢复时核对实际地址，桌面翻页结束后归还原窗口焦点。
 
 ```
 网页 / 桌面应用 / 剪贴板 / 本地文件
@@ -696,3 +700,88 @@ python _dev/c2t.py selftest                   # 文档里的命令与真实参�
 
 `SKILL.md` 描述 Agent 的操作流程，命令参数可通过 `--help` 查看。
 `selftest` 在源码仓库中核对文档引用的子命令，发现不匹配项或缺少文档时返回非零退出码。
+
+## 15. JSON 与 DOM 结构提取
+
+结构任务使用 `schema = 2`。JSON 用数组路径声明记录，再为每个字段配置相对路径：
+
+```toml
+schema = 2
+name = "orders-json"
+
+[segment]
+mode = "json"
+path = "/data/orders"
+
+[fields.id]
+kind = "json"
+path = "/id"
+type = "int"
+
+[fields.amount]
+kind = "json"
+path = "/amount"
+```
+
+路径 `/data/orders/0` 表示数组第一项；键中的 `~` 和 `/` 分别写为 `~0` 和 `~1`。
+text 字段保留数值的原始写法，例如 `1.2300`；int 保留整数精度，float 按浮点数转换。
+null、键缺失、空字符串、false 和 0 各自记录原始状态。
+
+DOM 规则先定位一个区域，再选记录容器，字段选择器相对记录：
+
+```toml
+[segment]
+mode = "dom"
+region = "#orders"
+records = "article.order"
+
+[fields.id]
+kind = "dom"
+sel = "a"
+attr = "data-id"
+
+[fields.amount]
+kind = "dom"
+sel = "span.amount"
+match = "unique"
+```
+
+`attr = "text"` 为默认值，读取元素文本；其他值读取对应属性。
+选择器支持标签、类、ID、属性存在及相等匹配、后代、直接子节点和 `:nth-of-type(n)`。
+`match = "unique"` 将多匹配记为歧义；`match = "first"` 明确取第一项。
+区域零匹配、多匹配及嵌套记录返回 `structure_selection`，据此调整卡片中的区域或记录选择器。
+
+运行随仓库提供的样本：
+
+```bash
+clip2table task check fixtures/structured/orders-json/card.toml --json-file fixtures/structured/orders-json/orders.json --field amount
+clip2table task run -p fixtures/structured/orders-json/card.toml --json-file fixtures/structured/orders-json/orders.json -d out/json-orders --yes
+clip2table task check fixtures/structured/orders-dom/card.toml --html-file fixtures/structured/orders-dom/orders.html --field amount
+clip2table task run -p fixtures/structured/orders-dom/card.toml --html-file fixtures/structured/orders-dom/orders.html -d out/dom-orders --yes
+clip2table ledger -d out/json-orders -f csv -o out/json-orders.csv
+```
+
+预览显示字段路径或快照节点位置。修改卡片后，使用 `replay -d <数据集> -p <卡片>` 重算保存的原文，比较并选择候选版本。
+浏览器 DOM 任务通过 CDP 保存页面快照，等待区域出现后读取；HTTP 和 HTML 文件使用同一套离线解析规则。
+API 的 `PreviewRequest`、`ExecuteRequest` 支持 `json_file`，返回的行与字段 trace 包含 `locator`，质量信息包含 `coverage`。
+
+候选可用 `task check <卡片> --json-file <文件> --pick N --write` 保存；DOM 输入使用 `--html-file`。
+API 的 `PreviewRequest.candidate_id` 选择预览候选；执行返回 structure_selection 时，向 resume 传入 action_id、candidate_id 和最新 checkpoint。
+
+## 16. 增量数据与查询
+
+新数据集使用布局 3。原文和解析按页提交，修订保存父版本与变化引用，达到阈值时生成快照。
+SQLite 缓存对象、观察和台账视图；日常追加更新相关实体，索引缺失时从保存的事实重建。
+
+```python
+from clip2table import api
+
+rows, fields, counts = api.query_view("out/orders", limit=100, offset=0)
+result = api.export(api.ExportRequest(
+    dataset="out/orders", out="orders.xlsx", format="xlsx", detail="summary"))
+```
+
+导出固定版本、策略、决定集合和基线，状态保存查询与产物摘要。CSV/JSONL/Markdown 逐行写出，XLSX 分段写入工作表，列宽取前 200 行样本。
+超长值和格式损失说明写入伴随文件；summary 返回数量与文件引用，full 返回完整说明。
+
+旧布局采用、版本与后端条件见 [兼容说明](compatibility.md)；两个安装场景及维护约定见 [场景包](scenes.md)。

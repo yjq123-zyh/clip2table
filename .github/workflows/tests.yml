@@ -76,6 +76,11 @@ jobs:
           & $exe -V
           & $exe cards list
           & $exe test notice-list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe test scene:order-ledger
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe test scene:notice-list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # wheel 里只有代码，没有 SKILL.md 和 docs/。所以从装好的副本跑 selftest
       # 一定是「什么也没查到」——这种情况必须是失败，不能是「跳过，算通过」。

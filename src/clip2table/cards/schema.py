@@ -18,7 +18,7 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 TOP_KEYS = {"schema", "name", "channel", "harvest", "target", "fetch",
             "segment", "fields", "paging", "dedupe", "samples", "task",
             "ledger"}
-SEGMENT_MODES = ("anchor", "blank", "single", "lines", "periodic")
+SEGMENT_MODES = ("anchor", "blank", "single", "lines", "periodic", "json", "dom")
 # What a task says about itself. Kept inside the card file on purpose: a task
 # that lives somewhere else drifts from the rules it claims to run, and the
 # first thing a user does after a bad page is open the rules. `stats` is the
@@ -44,6 +44,9 @@ class Card:
     anchor_next: str | None = None
     min_lines: int = 1
     segment_mode: str = "anchor"
+    segment_path: str = ""
+    segment_region: str = ""
+    segment_records: str = ""
     segment_period: int | None = None
     segment_offset: int = 0
     segment_count: int | None = None
@@ -127,8 +130,8 @@ def parse_card(data: dict[str, Any], path: str = "") -> Card:
                          hint=f"允许的是 {sorted(TOP_KEYS)}")
 
     schema = data.get("schema")
-    if schema != 1:
-        raise InputError(f"{path}: schema 必须是 1，实际是 {schema!r}")
+    if schema not in (1, 2):
+        raise InputError(f"{path}: schema 必须是 1 或 2，实际是 {schema!r}")
 
     name = data.get("name")
     if not isinstance(name, str) or not NAME_RE.match(name):
@@ -144,6 +147,16 @@ def parse_card(data: dict[str, Any], path: str = "") -> Card:
     mode = seg.get("mode", "anchor")
     if mode not in SEGMENT_MODES:
         raise InputError(f"{path}: [segment].mode 只能是 {SEGMENT_MODES}，实际是 {mode!r}")
+
+    if mode in ("json", "dom"):
+        if schema != 2:
+            raise InputError(f"{path}: 结构规则需要 schema = 2")
+        from ..pipeline.structured import pointer_parts, selector_parts
+        if mode == "json":
+            pointer_parts(seg.get("path"))
+        else:
+            selector_parts(seg.get("region"))
+            selector_parts(seg.get("records"))
 
     period, offset, count = seg.get("period"), seg.get("offset", 0), seg.get("count")
     if mode == "periodic":
@@ -181,10 +194,15 @@ def parse_card(data: dict[str, Any], path: str = "") -> Card:
         kind = body.get("kind")
         if kind not in KINDS:
             raise InputError(f"{path}: [fields.{fname}].kind 只能是 {KINDS}，实际是 {kind!r}")
-        # Declaring something the runtime cannot fill must fail here, not at
-        # harvest time with an empty cell. `dom` and `json` are in the vocabulary
-        # but have no producer, so a card asking for them would silently produce
-        # None -- indistinguishable from "the page had no such value".
+        if kind in ("json", "dom"):
+            if schema != 2 or mode != kind:
+                raise InputError(f"{path}: {kind} 字段需要 schema=2 和同名结构分段")
+            if kind == "json":
+                pointer_parts(body.get("path"))
+            elif body.get("sel"):
+                selector_parts(body["sel"])
+        elif mode in ("json", "dom") and kind != "const":
+            raise InputError(f"{path}: {mode} 分段使用 {mode} 或 const 字段")
         check_kind(kind, channel, f"{path}: [fields.{fname}]")
         typ = body.get("type", "text")
         if typ not in TYPES:
@@ -192,7 +210,7 @@ def parse_card(data: dict[str, Any], path: str = "") -> Card:
 
         kwargs: dict[str, Any] = {"name": fname, "kind": kind, "type": typ}
         for key in ("col", "index", "pattern", "scope", "window", "sel", "attr",
-                    "path", "value", "min_len", "exclude", "strip",
+                    "path", "match", "value", "min_len", "exclude", "strip",
                     "unit", "multiplier", "percent", "on_range"):
             if key in body:
                 kwargs[key] = body[key]
@@ -315,7 +333,9 @@ def parse_card(data: dict[str, Any], path: str = "") -> Card:
                          hint=f"可用的字段是 {[s.name for s in specs]}")
 
     return Card(
-        name=name, schema=1, channel=channel, fields=specs,
+        name=name, schema=schema, channel=channel, fields=specs,
+        segment_path=seg.get("path", ""), segment_region=seg.get("region", ""),
+        segment_records=seg.get("records", ""),
         anchor=anchor, anchor_next=anchor_next,
         min_lines=int(seg.get("min_lines", 1)), segment_mode=mode,
         segment_period=period, segment_offset=offset, segment_count=count,

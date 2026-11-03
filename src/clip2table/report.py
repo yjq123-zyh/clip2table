@@ -157,6 +157,9 @@ class Report:
     # ------------------------------------------------------------- integrity
     def integrity(self) -> list[str]:
         out: list[str] = []
+        if self.result.coverage:
+            c = self.result.coverage
+            return [f"记录覆盖：候选 {c['candidates']}，已解析 {c['parsed']}，待处理 {len(c['pending'])}，去重 {c['deduplicated']}"]
         problem = self.result.check_conservation()
         if problem:
             out.append("✗ " + problem)
@@ -240,6 +243,7 @@ class Report:
             "total_lines": self.result.total_lines,
             "consumed_lines": self.result.consumed_lines,
             "conservation": self.result.check_conservation(),
+            "coverage": self.result.coverage,
             "deviations": self.result.deviations,
             "deviation_rows": self.result.deviation_rows,
             "pages": self.pages,

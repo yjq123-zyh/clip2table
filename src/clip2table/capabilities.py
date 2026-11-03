@@ -25,9 +25,6 @@ class Capability(NamedTuple):
     implemented: bool = True
 
 
-# Kinds that appear in KINDS but are not wired to any producer. They stay in the
-# vocabulary so old cards fail loudly rather than silently producing empties;
-# when a producer lands, flip `implemented` and add the channels.
 CAPABILITIES: dict[str, Capability] = {
     "cell": Capability("cell", ("http", "browser", "desktop"),
                        "表格的一列（HTML 表格或 TSV），列边界是事实"),
@@ -39,19 +36,14 @@ CAPABILITIES: dict[str, Capability] = {
                        "两个标记之间的文本，可跨行"),
     "const": Capability("const", ("http", "browser", "desktop"),
                         "固定值，只用于标注来源，从不拿来填数据"),
-    "dom": Capability(
-        "dom", (), "还没实现。现在是空值，但空值和「页面上没有这个元素」"
-                   "看起来一模一样。改用 line/search/span/cell —— 复制的文本里"
-                   "一样有这些字段", implemented=False),
-    "json": Capability(
-        "json", (), "还没实现。现在是空值。若目标是 JSON 接口，先把它存成文件，"
-                    "用 run --text-file 走文本路径", implemented=False),
+    "dom": Capability("dom", ("http", "browser", "desktop"), "HTML 快照中的记录和字段"),
+    "json": Capability("json", ("http",), "JSON 对象数组及相对字段路径"),
 }
 
 CHANNEL_CAPS: dict[str, tuple[str, ...]] = {
-    "http": ("cell", "line", "search", "span", "const"),
-    "browser": ("cell", "line", "search", "span", "const"),
-    "desktop": ("cell", "line", "search", "span", "const"),
+    "http": ("cell", "line", "search", "span", "const", "dom", "json"),
+    "browser": ("cell", "line", "search", "span", "const", "dom"),
+    "desktop": ("cell", "line", "search", "span", "const", "dom"),
 }
 
 

@@ -26,8 +26,8 @@ from .models import Captured, FieldTrace, ParseResult, Row
 
 # Layout versions are independent of the card schema and of the API version.
 # Bumping one must not force the others to move.
-LAYOUT = 2
-PARSE_FORMAT = 1
+LAYOUT = 3
+PARSE_FORMAT = 2
 
 DATASET_JSON = "dataset.json"
 CAPTURES = "captures"
@@ -156,7 +156,7 @@ def layout_of(path: str | Path) -> int:
     if not p.is_dir():
         return 0
     if (p / DATASET_JSON).is_file():
-        return 2
+        return int(_load(p / DATASET_JSON, {}).get("layout", 0))
     if (p / LEGACY_STATE).is_file() or (p / LEGACY_ROWS).is_file():
         return 1
     if (p / LEGACY_PAGES).is_dir():
@@ -177,7 +177,7 @@ def init(path: str | Path, *, dataset_id: str = "") -> dict[str, Any]:
     meta_path = p / DATASET_JSON
     meta = _load(meta_path, None)
     if isinstance(meta, dict):
-        if meta.get("layout") != LAYOUT:
+        if meta.get("layout") not in (2, LAYOUT):
             raise InputError(
                 f"{p} 的数据布局是 {meta.get('layout')!r}，这个版本只认 {LAYOUT}",
                 hint="新版本只增不改旧文件；遇到更高版本请升级 clip2table")
@@ -216,6 +216,7 @@ class CaptureRef:
     formats: list[str] = field(default_factory=list)
     chars: int = 0
     raw_available: bool = True
+    meta: dict[str, Any] = field(default_factory=dict)
     legacy_source: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -242,10 +243,13 @@ def write_capture(root: str | Path, cap: Captured, *,
     """
     root = Path(root)
     text = cap.payload if isinstance(cap.payload, str) else ""
-    if cap.kind == "json":
+    if cap.kind == "json" and (cap.payload is None or (cap.payload == "" and cap.json_payload is not None)):
         text = json.dumps(cap.json_payload, ensure_ascii=False, sort_keys=True)
+        cap.meta.setdefault("origin", "object")
     payload_hash = "sha256:" + _sha(text)
-    previous = next((r for r in list_captures(root) if r.run_id == run_id and r.page == page), None)
+    capture_id = "c-" + _sha(run_id, str(page))[:16]
+    saved = _load(_cap_dir(root, capture_id) / "meta.json", None)
+    previous = CaptureRef.from_dict(saved) if saved else None
     if previous:
         if previous.payload_hash != payload_hash or previous.kind != cap.kind:
             raise InputError("同一运行的这个页面已经保存了不同内容", code="observation_conflict")
@@ -263,7 +267,7 @@ def write_capture(root: str | Path, cap: Captured, *,
         observed_at=_now() if observed_at is None else observed_at,
         requested_url=cap.requested_url or "", observed_url=cap.observed_url or "",
         channel=cap.channel or "", engine=cap.engine or "",
-        formats=list(cap.formats or []), chars=len(text))
+        formats=list(cap.formats or []), chars=len(text), meta=dict(cap.meta))
 
     if (d / "meta.json").is_file():
         # Already written. Re-running the same page of the same run must not
@@ -278,6 +282,9 @@ def write_capture(root: str | Path, cap: Captured, *,
         import shutil
         shutil.rmtree(d)
     stage.replace(d)
+    if layout_of(root) == 3:
+        from . import index
+        index.record(root, "capture", ref.capture_id, ref.as_dict())
     return ref
 
 
@@ -303,13 +310,15 @@ def read_capture(root: str | Path,
             obj = json.loads(text)
         except json.JSONDecodeError as e:
             raise InputError(f"捕获 {capture_id} 的 JSON 原文坏了：{e}") from None
-        cap = Captured(kind="json", json_payload=obj, channel=ref.channel,
+        cap = Captured(kind="json", payload=text, json_payload=obj, channel=ref.channel,
                        engine=ref.engine, formats=list(ref.formats))
     else:
         cap = Captured(kind=ref.kind, payload=text, channel=ref.channel,
                        engine=ref.engine, formats=list(ref.formats))
+    cap.meta = dict(ref.meta)
     cap.requested_url = ref.requested_url
     cap.observed_url = ref.observed_url
+    cap.source_url = ref.observed_url
     return ref, cap
 
 
@@ -435,6 +444,9 @@ def card_from_rule(snap: RuleSnapshot):
         data["segment"]["record_lines"] = list(seg["record_lines"])
     if seg.get("required"):
         data["segment"]["required"] = list(seg["required"])
+    for key in ("path", "region", "records"):
+        if key in seg:
+            data["segment"][key] = seg[key]
     if seg.get("mode") == "periodic":
         data["segment"]["period"] = seg.get("period")
         data["segment"]["offset"] = int(seg.get("offset") or 0)
@@ -495,6 +507,7 @@ class ParseRef:
     level: str = ""
     fill: dict[str, float] = field(default_factory=dict)
     legacy_policy: dict[str, Any] = field(default_factory=dict)
+    coverage: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -507,12 +520,14 @@ class ParseRef:
     @property
     def complete(self) -> bool:
         """A parse whose lines balance can be used as evidence."""
+        if self.coverage:
+            return not self.coverage.get("pending") and self.coverage["candidates"] == self.coverage["parsed"]
         accounted = self.consumed_lines + self.unparsed
         return self.total_lines == 0 or accounted == self.total_lines
 
 
 def _row_record(row: Row) -> dict[str, Any]:
-    return {"values": row.values,
+    return {"values": row.values, "locator": row.locator,
             "source_page": row.source_page,
             "source_line": row.source_line,
             # Kept because a later parse is compared with this one at line
@@ -536,7 +551,7 @@ def _row_from(rec: dict[str, Any]) -> Row:
                source_page=rec.get("source_page"),
                source_line=rec.get("source_line"),
                raw_at=list(rec.get("raw_at") or []),
-               traces=traces)
+               traces=traces, locator=dict(rec.get("locator") or {}))
 
 
 @writing
@@ -554,9 +569,15 @@ def write_parse(root: str | Path, cap_ref: CaptureRef, rule: RuleSnapshot,
         result_schema=PARSE_FORMAT, created=_now(),
         rows=len(res.rows), unparsed=len(res.unparsed),
         total_lines=res.total_lines, consumed_lines=res.consumed_lines,
-        level=res.level, fill=res.fill_rates, legacy_policy=legacy_policy or {})
+        level=res.level, fill=res.fill_rates, legacy_policy=legacy_policy or {},
+        coverage=res.coverage)
     if (d / "meta.json").is_file():
-        return ParseRef.from_dict(_load(d / "meta.json", ref.as_dict()))
+        saved = _load(d / "meta.json", ref.as_dict())
+        if layout_of(root) == 3:
+            from . import index
+            if index.metadata(root, "parse", parse_id) is None:
+                index.record(root, "parse", parse_id, saved)
+        return ParseRef.from_dict(saved)
 
     stage = d.with_name(".tmp-" + d.name + "-" + uuid.uuid4().hex)
     stage.mkdir(parents=True)
@@ -575,6 +596,9 @@ def write_parse(root: str | Path, cap_ref: CaptureRef, rule: RuleSnapshot,
         import shutil
         shutil.rmtree(d)
     stage.replace(d)
+    if layout_of(root) == 3:
+        from . import index
+        index.record(root, "parse", ref.parse_id, meta)
     return ref
 
 
@@ -585,7 +609,7 @@ def read_parse(root: str | Path,
     if not isinstance(meta, dict):
         raise InputError(f"没有这份解析结果：{parse_id}")
     ref = ParseRef.from_dict(meta)
-    if ref.result_schema != PARSE_FORMAT:
+    if ref.result_schema not in (1, PARSE_FORMAT):
         raise InputError(f"不支持解析结果格式 {ref.result_schema}", code="unsupported_version")
     rows: list[Row] = []
     p = d / "rows.jsonl"
@@ -608,7 +632,7 @@ def read_parse(root: str | Path,
                       unparsed=unparsed, total_lines=ref.total_lines,
                       consumed_lines=ref.consumed_lines, level=ref.level,
                       notes=list(meta.get("notes") or []),
-                      deviations=list(meta.get("deviations") or []))
+                      deviations=list(meta.get("deviations") or []), coverage=ref.coverage)
     return ref, res
 
 
@@ -650,7 +674,8 @@ class ResultRevision:
     policy: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
-        return dataclasses.asdict(self)
+        return {f.name: list(self.entries) if f.name == "entries" else getattr(self, f.name)
+                for f in dataclasses.fields(self)}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ResultRevision":
@@ -692,6 +717,9 @@ def carry_forward(root: str | Path, base_revision: str | None,
     if not base_revision:
         return list(entries)
     base = read_revision(root, base_revision)
+    if layout_of(root) == 3:
+        from .index import Overlay
+        return Overlay(base.entries, entries)
     covered = {cid for cid, _ in entries}
     carried = [(e["capture_id"], e["parse_id"]) for e in base.entries
                if e.get("parse_id")
@@ -712,10 +740,23 @@ def write_revision(root: str | Path, entries: list[tuple[str, str]], *,
     reparse is the point of A03 -- but `activate()` will not make it the table.
     """
     root = Path(root)
+    incremental = layout_of(root) == 3
+    parent_ref = read_revision(root, parent) if parent else None
+    from .index import Overlay
+    updates = entries.updates if isinstance(entries, Overlay) else list(entries)
     seen: set[str] = set()
     rows: list[dict[str, str]] = []
-    complete = True
-    for capture_id, parse_id in entries:
+    bad_captures = set()
+    if parent_ref and incremental:
+        previous = _load(root / REVISIONS / f"{parent}.json", {})
+        if "bad_captures" in previous:
+            bad_captures.update(previous["bad_captures"])
+        elif not parent_ref.quality_complete:
+            for item in parent_ref.entries:
+                meta = _load(root / PARSES / item["parse_id"] / "meta.json", {})
+                if not ParseRef.from_dict(meta).complete:
+                    bad_captures.add(item["capture_id"])
+    for capture_id, parse_id in (updates if incremental else entries):
         if capture_id in seen:
             raise InputError(f"结果版本里同一个捕获出现了两次：{capture_id}",
                              hint="一个捕获在一个版本里只能选一份解析结果")
@@ -730,8 +771,10 @@ def write_revision(root: str | Path, entries: list[tuple[str, str]], *,
             raise InputError(
                 f"解析结果 {parse_id} 不是捕获 {capture_id} 的（它属于 {ref.capture_id}）",
                 hint="同一版本里每个捕获只能配自己那份解析")
-        if not ref.complete:
-            complete = False
+        if ref.complete:
+            bad_captures.discard(capture_id)
+        else:
+            bad_captures.add(capture_id)
         cap_meta = _load(root / CAPTURES / capture_id / "meta.json", {})
         if cap_meta.get("raw_available", True):
             read_capture(root, capture_id)
@@ -748,11 +791,14 @@ def write_revision(root: str | Path, entries: list[tuple[str, str]], *,
     failed = list(failed or [])
     requested = list(requested_captures) if requested_captures is not None else [r["capture_id"] for r in rows]
     coverage = set(requested) <= seen
+    if incremental and requested_captures is not None:
+        coverage = set(requested) <= (seen | set(parent_ref.captures if parent_ref else []))
     inherited_policy = read_revision(root, parent).policy if parent else {}
     pol = policy if policy is not None else inherited_policy
     identity = json.dumps([failed, requested, target_rule, operation_complete, pol],
                           ensure_ascii=False, sort_keys=True)
     revision_id = "v-" + _sha(parent or "", body, reason, identity)[:16]
+    complete = not bad_captures
     rev = ResultRevision(revision_id=revision_id, created=_now(),
                          reason=reason, parent=parent, entries=rows,
                          complete=complete and coverage and operation_complete and not failed,
@@ -762,14 +808,47 @@ def write_revision(root: str | Path, entries: list[tuple[str, str]], *,
                          target_rule=target_rule, policy=pol)
     path = root / REVISIONS / f"{revision_id}.json"
     if not path.is_file():
-        _dump(rev.as_dict(), path)
-    return rev
+        body = rev.as_dict()
+        if incremental:
+            from . import index
+            body["bad_captures"] = sorted(bad_captures)
+            body.pop("entries")
+            body["delta"] = rows
+            # Replacement revisions carry the complete requested set explicitly.
+            base_count = len(parent_ref.entries) if parent_ref else 0
+            replaced = set()
+            if parent_ref:
+                with index.database(root) as db:
+                    index._members(db, root, parent)
+                    replaced = {cid for cid, _ in updates if db.execute(
+                        "SELECT 1 FROM members WHERE capture_id=?", (cid,)).fetchone()}
+            body["entry_count"] = base_count + len(rows) - len(replaced)
+            previous = index.metadata(root, "revision", parent) if parent else None
+            threshold = max(128, int((previous or {}).get("snapshot_size", 0)) * 2)
+            edits = int((previous or {}).get("edits", 0)) + len(rows)
+            body["snapshot_size"] = (previous or {}).get("snapshot_size", 0)
+            body["edits"] = edits
+            if body["entry_count"] >= threshold or (body["snapshot_size"] and edits >= body["entry_count"]):
+                body["entries"] = [{"capture_id": c, "parse_id": p} for c, p in entries]
+                body["snapshot_size"], body["edits"] = body["entry_count"], 0
+            _dump(body, path)
+            index.record(root, "revision", revision_id, body)
+        else:
+            _dump(body, path)
+    elif incremental:
+        from . import index
+        if index.metadata(root, "revision", revision_id) is None:
+            index.record(root, "revision", revision_id, _load(path, {}))
+    return read_revision(root, revision_id) if incremental else rev
 
 
 def read_revision(root: str | Path, revision_id: str) -> ResultRevision:
     d = _load(Path(root) / REVISIONS / f"{revision_id}.json", None)
     if not isinstance(d, dict):
         raise InputError(f"没有这个结果版本：{revision_id}")
+    if "delta" in d:
+        from .index import Entries
+        d["entries"] = Entries(root, revision_id, d["entry_count"])
     return ResultRevision.from_dict(d)
 
 
@@ -788,7 +867,7 @@ def list_revisions(root: str | Path) -> list[ResultRevision]:
     for p in sorted(base.glob("*.json")):
         d = _load(p, None)
         if isinstance(d, dict):
-            out.append(ResultRevision.from_dict(d))
+            out.append(read_revision(root, d["revision_id"]))
     out.sort(key=lambda r: (r.created, r.revision_id))
     return out
 
@@ -806,7 +885,10 @@ def activate(root: str | Path, revision_id: str, *,
     """
     root = Path(root)
     rev = read_revision(root, revision_id)
-    for entry in rev.entries:
+    check_entries = rev.entries
+    if layout_of(root) == 3:
+        check_entries = _load(root / REVISIONS / f"{revision_id}.json", {}).get("delta", rev.entries)
+    for entry in check_entries:
         cap_meta = _load(root / CAPTURES / entry["capture_id"] / "meta.json", None)
         if cap_meta is None:
             raise InputError("版本引用的捕获缺失", code="corrupt_capture")
@@ -841,6 +923,9 @@ def activate(root: str | Path, revision_id: str, *,
            "operation_id": operation_id,
            "decision_set_id": decision_set_id if decision_set_id is not None else cur.get("decision_set_id", "")}
     _dump(out, root / ACTIVE)
+    if layout_of(root) == 3:
+        from . import index
+        index.record(root, "selection", str(out["generation"]), out)
     return out
 
 
@@ -852,6 +937,75 @@ def active(root: str | Path) -> dict[str, Any]:
 def active_token(root: str | Path) -> dict[str, Any]:
     cur = active(root)
     return {"revision_id": cur.get("revision_id", ""), "generation": cur.get("generation", 0)}
+
+
+def adopt_dataset(source: str | Path, target: str | Path):
+    """Adopt a versioned dataset into a separate incremental directory."""
+    import shutil
+    source, target = Path(source).resolve(), Path(target).resolve()
+    if source == target or source in target.parents or target in source.parents:
+        raise InputError("源目录和目标目录需要各自独立")
+    if layout_of(source) not in (2, 3):
+        raise InputError("按页采用旧数据时，请指定页号")
+    if target.exists() and any(target.iterdir()):
+        raise InputError("目标目录需要为空")
+    target.mkdir(parents=True, exist_ok=True)
+    def remap(value):
+        if isinstance(value, str) and (value == str(source) or value.startswith(str(source) + "\\") or value.startswith(str(source) + "/")):
+            destination = Path(str(target) + value[len(str(source)):])
+            if Path(value).is_file() and not destination.exists():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(value, destination)
+            return str(destination)
+        if isinstance(value, dict):
+            return {key: remap(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [remap(item) for item in value]
+        return value
+    with writer(source), writer(target):
+        for name in (CAPTURES, PARSES, RULES, REVISIONS, RUNS, "operation-state", "operations", "decisions", "events"):
+            src = source / name
+            if src.exists():
+                shutil.copytree(src, target / name, dirs_exist_ok=True)
+        for name in (DATASET_JSON, ACTIVE):
+            if (source / name).exists():
+                shutil.copy2(source / name, target / name)
+        for name in (RUNS, "operation-state", "operations"):
+            for file in (target / name).rglob("*.json"):
+                body = remap(_load(file, {}))
+                if name == "operation-state":
+                    for artifact in body.get("export", {}).get("artifacts", []):
+                        stage = Path(artifact["stage"])
+                        if stage.is_file():
+                            copy = target / "export-staging" / body["operation_id"] / stage.name
+                            copy.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(stage, copy)
+                            artifact["stage"] = str(copy)
+                _dump(body, file)
+        meta = dataset_meta(target)
+        original = meta.get("migration", {}).get("source", str(source))
+        meta.update(layout=3, migration={"source": original, "target": str(target), "adopted_at": _now()})
+        _dump(meta, target / DATASET_JSON)
+        for file in (target / RUNS).glob("*.json"):
+            run = RunRecord.from_dict(_load(file, {}))
+            if run.page_events:
+                continue
+            entries = {item["capture_id"]: item["parse_id"] for item in run.entries}
+            run.rows = 0
+            for cid in run.captures:
+                cap = _load(target / CAPTURES / cid / "meta.json", {})
+                pid = entries.get(cid)
+                rows = _load(target / PARSES / pid / "meta.json", {}).get("rows", 0) if pid else 0
+                run.rows += rows
+                _dump({"capture_id": cid, "parse_id": pid, "rule_id": run.rule_id,
+                       "page": cap["page"], "rows": rows}, target / RUNS / run.run_id / f"{cap['page']:012}.adopted.json")
+            run.page_events = True
+            save_run(target, run)
+        from . import index
+        index.rebuild(target)
+        _dump({"source": str(source), "target": str(target), "dataset_id": meta["dataset_id"],
+               "layout": 3, "adopted_at": meta["migration"]["adopted_at"]}, target / "adoption.json")
+        return meta
 
 
 # ---------------------------------------------------------------- runs
@@ -874,6 +1028,8 @@ class RunRecord:
     config: dict[str, Any] = field(default_factory=dict)
     operation_id: str = ""
     entries: list[dict[str, str]] = field(default_factory=list)
+    rows: int = 0
+    page_events: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -902,13 +1058,38 @@ def save_run(root: str | Path, run: RunRecord) -> RunRecord:
 
 
 def _save_run(root: str | Path, run: RunRecord) -> None:
-    _dump(run.as_dict(), Path(root) / RUNS / f"{run.run_id}.json")
+    compact = layout_of(root) == 3 and run.page_events
+    body = {f.name: getattr(run, f.name) for f in dataclasses.fields(run)
+            if not compact or f.name not in ("captures", "entries")}
+    if compact and run.status != "running":
+        _dump({"captures": run.captures, "entries": run.entries, "rows": run.rows},
+              Path(root) / RUNS / run.run_id / "snapshot.json")
+        body["snapshot"] = "snapshot.json"
+    _dump(body, Path(root) / RUNS / f"{run.run_id}.json")
 
 
 def read_run(root: str | Path, run_id: str) -> RunRecord:
     d = _load(Path(root) / RUNS / f"{run_id}.json", None)
     if not isinstance(d, dict):
         raise InputError(f"没有这次运行：{run_id}")
+    if d.get("page_events"):
+        if d.get("snapshot"):
+            snapshot = _load(Path(root) / RUNS / run_id / d["snapshot"], None)
+            if snapshot is not None:
+                d.update(snapshot)
+                return RunRecord.from_dict(d)
+        captures, entries, row_counts = {}, {}, {}
+        for file in sorted((Path(root) / RUNS / run_id).glob("*.json")):
+            if file.name == "snapshot.json":
+                continue
+            item = _load(file, {})
+            captures[item["capture_id"]] = item["page"]
+            if item.get("parse_id") and item.get("rule_id") == d.get("rule_id"):
+                entries[item["capture_id"]] = item["parse_id"]
+                row_counts[item["capture_id"]] = item["rows"]
+        ordered = sorted(captures, key=captures.get)
+        d.update(captures=ordered, entries=[{"capture_id": c, "parse_id": entries[c]} for c in ordered if c in entries],
+                 rows=sum(row_counts.values()))
     return RunRecord.from_dict(d)
 
 
@@ -920,7 +1101,7 @@ def list_runs(root: str | Path) -> list[RunRecord]:
     for p in sorted(base.glob("*.json")):
         d = _load(p, None)
         if isinstance(d, dict):
-            out.append(RunRecord.from_dict(d))
+            out.append(read_run(root, d["run_id"]))
     return out
 
 
@@ -946,9 +1127,12 @@ class Publisher:
         self.root = Path(root)
         self.card = card
         self.run = run
+        self.run.status = "running"
         self.base_revision = base_revision
         self.rule = write_rule(self.root, card)
         self.entries = [(e["capture_id"], e["parse_id"]) for e in run.entries]
+        self._parses = dict(self.entries)
+        self._captures = set(run.captures)
         # One rule per run: the card cannot change mid-run without the whole
         # revision meaning two different things.
         self.run.rule_id = self.rule.rule_id
@@ -960,16 +1144,24 @@ class Publisher:
     def page(self, page: int, cap: Captured,
              res: ParseResult | None) -> tuple[CaptureRef, ParseRef | None]:
         cref = write_capture(self.root, cap, run_id=self.run.run_id, page=page)
-        if cref.capture_id not in self.run.captures:
+        if cref.capture_id not in self._captures:
+            self._captures.add(cref.capture_id)
             self.run.captures.append(cref.capture_id)
         pref: ParseRef | None = None
         if res is not None:
             pref = write_parse(self.root, cref, self.rule, res)
-            if all(c != cref.capture_id for c, _ in self.entries):
+            if cref.capture_id not in self._parses:
+                self._parses[cref.capture_id] = pref.parse_id
                 self.entries.append((cref.capture_id, pref.parse_id))
+                self.run.entries.append({"capture_id": cref.capture_id, "parse_id": pref.parse_id})
+                self.run.rows += pref.rows
         self.run.checkpoint = {"pages": len(self.run.captures),
                                "parses": len(self.entries), "next_page": page + 1}
-        self.run.entries = [{"capture_id": c, "parse_id": p} for c, p in self.entries]
+        if layout_of(self.root) == 3:
+            self.run.page_events = True
+            _dump({"capture_id": cref.capture_id, "parse_id": pref.parse_id if pref else self._parses.get(cref.capture_id),
+                   "rule_id": self.rule.rule_id, "rows": pref.rows if pref else 0,
+                   "page": page}, self.root / RUNS / self.run.run_id / f"{page:012}.{self.rule.rule_id}.{pref.parse_id if pref else 'capture'}.json")
         save_run(self.root, self.run)
         return cref, pref
 

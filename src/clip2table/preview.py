@@ -46,12 +46,12 @@ def grid(res: ParseResult, limit: int = 10, show_source: bool = True) -> Grid:
     """Records × fields, plus where each record started in the source text."""
     rows = res.rows[:limit]
     fields = list(res.fields)
-    head = ["#"] + fields + (["原文行"] if show_source else [])
+    head = ["#"] + fields + (["来源位置" if res.coverage else "原文行"] if show_source else [])
     body: list[list[str]] = []
     for i, r in enumerate(rows, 1):
         cells = [_value(r.values.get(f)) for f in fields]
         src = "" if not show_source else (
-            f"{r.source_line + 1}" if r.source_line is not None else "—")
+            f"{r.source_line + 1}" if r.source_line is not None else r.locator.get("path", "—"))
         body.append([str(i)] + cells + ([src] if show_source else []))
     widths = {h: len(h) for h in head}
     for line in body:
@@ -183,6 +183,8 @@ def _where_text(row: Row, t) -> str:
     """`第 N 行：原文` when the trace has a line, else what it does have."""
     if t is None:
         return "未记录来源"
+    if t.locator:
+        return f"{t.locator.get('kind')} {t.locator.get('path')}" + (f" @{t.locator['attr']}" if t.locator.get("attr") else "")
     if t.line is None:
         return "未记录行号"
     abs_line = source_of(row, t)

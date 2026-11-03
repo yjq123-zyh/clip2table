@@ -1,0 +1,25 @@
+schema = 2
+name = "structured-orders"
+channel = "http"
+samples = "."
+
+[fetch]
+url = "https://example.test/orders?page={page}"
+
+[segment]
+mode = "dom"
+region = "#orders"
+records = "article.order"
+
+[fields.id]
+kind = "dom"
+sel = "a"
+attr = "data-id"
+
+[fields.amount]
+kind = "dom"
+sel = "span.amount"
+
+[dedupe]
+key = ["id"]
+mutable = ["amount"]

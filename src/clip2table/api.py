@@ -132,14 +132,17 @@ class Request:
 class PreviewRequest(Request):
     text_file: str = ""
     html_file: str = ""
+    json_file: str = ""
     url: str = ""
     rows: int = 5
+    candidate_id: str = ""
 
 
 @dataclass
 class ExecuteRequest(Request):
     text_file: str = ""
     html_file: str = ""
+    json_file: str = ""
     url: str = ""
     max_pages: int | None = None
     port: int | None = None
@@ -194,6 +197,7 @@ class ExportRequest(Request):
     overwrite: bool = False
     decision_set_id: str | None = None
     include_metadata: bool = True
+    detail: str = "full"
     baseline_decision_set_id: str = ""
 
 
@@ -206,7 +210,11 @@ def _digest(value) -> str:
 
 def _result(body) -> OperationResult:
     known = {f.name for f in dataclasses.fields(OperationResult)}
-    return OperationResult(**{k: v for k, v in body.items() if k in known})
+    out = OperationResult(**{k: v for k, v in body.items() if k in known})
+    if out.data.get("detail") == "full" and out.data.get("render_changes_ref"):
+        with Path(out.data["render_changes_ref"]).open(encoding="utf-8") as stream:
+            out.data["render_changes"] = [json.loads(line) for line in stream]
+    return out
 
 
 def _state_path(root: Path, oid: str) -> Path:
@@ -224,8 +232,12 @@ def _save(root: Path, state: dict) -> None:
 def _fingerprint(operation, req, card=None, policy=None, extra=None) -> str:
     body = dataclasses.asdict(req)
     body.pop("request_id", None)
+    if not body.get("json_file"):
+        body.pop("json_file", None)
+    if body.get("detail") == "full":
+        body.pop("detail")
     content = {}
-    for key in ("text_file", "html_file"):
+    for key in ("text_file", "html_file", "json_file"):
         filename = body.get(key)
         if filename:
             path = Path(filename)
@@ -237,6 +249,18 @@ def _fingerprint(operation, req, card=None, policy=None, extra=None) -> str:
         content["card"] = _card_fingerprint(card)
     if policy is not None:
         content["policy"] = policy.as_dict()
+    migration = revisions.dataset_meta(req.dataset).get("migration", {}) if req.dataset else {}
+    if migration:
+        target, source = migration["target"], migration["source"]
+        def original(value):
+            if isinstance(value, str) and (value == target or value.startswith(target + "\\") or value.startswith(target + "/")):
+                return source + value[len(target):]
+            if isinstance(value, dict):
+                return {key: original(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [original(item) for item in value]
+            return value
+        body = original(body)
     return _digest([operation, body, content, extra or {}])
 
 
@@ -362,7 +386,10 @@ def _entry(operation: str, *, write: bool):
                     if transition:
                         state.update(checkpoint=out.checkpoint, counts=out.counts,
                                      outputs=out.outputs, action=out.action, status=out.status)
-                    saved = {"fingerprint": fp, "result": out.as_dict()}
+                    result_body = out.as_dict()
+                    if operation == "export" and result_body["data"].get("render_changes_ref"):
+                        result_body["data"]["render_changes"] = []
+                    saved = {"fingerprint": fp, "result": result_body}
                     state["results"][req.request_id] = saved
                     _save(root, state)  # committed outcome survives a missing receipt
                     revisions._dump(saved, rp)
@@ -390,7 +417,7 @@ def _require(root: Path) -> None:
 
 def _v2(root: Path, what: str = "") -> None:
     _require(root)
-    if revisions.layout_of(root) != 2:
+    if revisions.layout_of(root) not in (2, 3):
         raise InputError(f"{root} 还是旧布局，请显式采用旧页面后再使用版本接口",
                          code="legacy_layout")
     revisions.init(root)
@@ -399,7 +426,7 @@ def _v2(root: Path, what: str = "") -> None:
 def _capture(req) -> Captured:
     if getattr(req, "capture", None):
         return Captured(**req.capture)
-    for name, kind in (("text_file", "text"), ("html_file", "html")):
+    for name, kind in (("text_file", "text"), ("html_file", "html"), ("json_file", "json")):
         filename = getattr(req, name, "")
         if filename:
             path = Path(filename)
@@ -442,14 +469,19 @@ def preview(req: PreviewRequest, card=None, capture=None) -> OperationResult:
         from .cards.loader import resolve_card
         card = resolve_card(req.card)
     cap = capture or _capture(req)
-    res, inf = parse_capture(cap, card)
     candidates = []
+    if card is not None and card.segment_mode in ("json", "dom"):
+        from .pipeline.structured import structure_candidates, choose_structure
+        candidates = structure_candidates(cap, card)
+        if req.candidate_id:
+            card = choose_structure(card, candidates, req.candidate_id)
+    res, inf = parse_capture(cap, card)
     if inf:
         candidates = [dict(index=i, **dataclasses.asdict(c)) for i, c in enumerate(inf.alternates, 1)]
     return OperationResult(operation="preview", counts={"rows": len(res.rows),
                            "fields": len(res.fields), "unparsed": len(res.unparsed)},
                            quality={"level": res.level, "fill": res.fill_rates,
-                                    "conservation": res.check_conservation()},
+                                    "conservation": res.check_conservation(), "coverage": res.coverage},
                            data={"fields": res.fields,
                                  "rows": [revisions._row_record(r) for r in res.rows],
                                  "unparsed": res.unparsed[:50], "candidates": candidates})
@@ -492,7 +524,7 @@ def _run_checkpoint(root, state, run):
     state["counts"] = {"pages": len(run.entries),
                        "captured_pages": len(run.captures),
                        "committed": len(run.entries),
-                       "rows": sum(revisions.read_parse(root, e["parse_id"])[0].rows for e in run.entries)}
+                       "rows": run.rows if revisions.layout_of(root) == 3 else sum(revisions._load(Path(root) / revisions.PARSES / e["parse_id"] / "meta.json", {})["rows"] for e in run.entries)}
     _save(root, state)
 
 
@@ -500,14 +532,29 @@ def _recover_pages(root, pub):
     """A capture published before the progress file is enough to finish that page."""
     from .core import parse_capture
     known = {c for c, _ in pub.entries}
-    for cref in sorted((c for c in revisions.list_captures(root) if c.run_id == pub.run.run_id),
-                       key=lambda c: c.page):
+    if revisions.layout_of(root) == 3:
+        from .index import run_captures
+        captures = [revisions.CaptureRef.from_dict(c) for c in run_captures(root, pub.run.run_id)]
+        page = max((c.page for c in captures), default=0) + 1
+        from . import index
+        while True:
+            cid = "c-" + revisions._sha(pub.run.run_id, str(page))[:16]
+            meta = revisions._load(Path(root) / revisions.CAPTURES / cid / "meta.json", None)
+            if meta is None:
+                break
+            index.record(root, "capture", cid, meta)
+            captures.append(revisions.CaptureRef.from_dict(meta))
+            page += 1
+    else:
+        captures = sorted((c for c in revisions.list_captures(root) if c.run_id == pub.run.run_id), key=lambda c: c.page)
+    for cref in captures:
         if cref.capture_id in known:
             continue
         _, cap = revisions.read_capture(root, cref.capture_id)
         res, _ = parse_capture(cap, pub.card)
         pub.page(cref.page, cap, res)
-    return max((revisions.read_capture(root, c)[0].page for c, _ in pub.entries), default=0) + 1
+    parsed = {cid for cid, _ in pub.entries}
+    return max((c.page for c in captures if c.capture_id in parsed), default=0) + 1
 
 
 def _collect(req, card, state, root, *, continuing=False):
@@ -527,7 +574,7 @@ def _collect(req, card, state, root, *, continuing=False):
         state["run_id"] = "run-" + _digest(state["operation_id"])[:20]
         _save(root, state)
     frozen = state["frozen"]
-    card = revisions.restore_card(frozen["card"])
+    card = revisions.restore_card(state.get("resolved_structure") or frozen["card"])
     if state.get("resolved_target"):
         card.harvest["target_id"] = state["resolved_target"]
     config = frozen["request"]
@@ -535,12 +582,16 @@ def _collect(req, card, state, root, *, continuing=False):
     run = revisions.read_run(root, state["run_id"]) if run_file.is_file() else revisions.new_run(
         root, task=card.name, base_revision=frozen["base"], config=frozen,
         operation_id=state["operation_id"], run_id=state["run_id"])
+    if state.get("resolved_rule") and run.rule_id != state["resolved_rule"]:
+        run.entries = []
+        run.rows = 0
+        run.config["resolved_structure"] = state["resolved_structure"]
     pub = revisions.Publisher(root, card, run=run, base_revision=frozen["base"])
     try:
         start = _recover_pages(root, pub)
     finally:
         _run_checkpoint(root, state, pub.run)
-    is_file = bool(config.get("text_file") or config.get("html_file") or config.get("url") or config.get("capture"))
+    is_file = bool(config.get("text_file") or config.get("html_file") or config.get("json_file") or config.get("url") or config.get("capture"))
     limit = config.get("max_pages") if config.get("max_pages") is not None else card.max_pages
     limit = max(1, int(limit))
     if is_file:
@@ -574,7 +625,7 @@ def _collect(req, card, state, root, *, continuing=False):
                 multi = harvest_pages(card, max_pages=remaining,
                                       port=config.get("port"), allow_force=config.get("allow_force", False),
                                       start_page=start, on_capture=capture_page, on_page=land,
-                                      positioned=positioned)
+                                      positioned=positioned, retain_rounds=False)
                 stop = multi.stopped_code or "scope_limit_reached"
             finally:
                 _run_checkpoint(root, state, run)
@@ -597,19 +648,27 @@ def _collect(req, card, state, root, *, continuing=False):
                            operation_id=state["operation_id"])
     counts = dict(state["counts"])
     if not card.dedupe_key:
-        counts["dataset_rows"] = sum(revisions.read_parse(root, e["parse_id"])[0].rows for e in rev.entries)
+        counts["dataset_rows"] = sum(revisions._load(root / revisions.PARSES / e["parse_id"] / "meta.json", {})["rows"]
+                                     for e in rev.entries)
+        run.status = COMPLETED
+        revisions.save_run(root, run)
         return OperationResult(operation="execute", run_id=run.run_id, reason=stop,
                                outputs=state["outputs"], counts=counts,
                                checkpoint=run.checkpoint, data={"revision": rev.revision_id})
-    led = ledger_mod.build(root, rev.revision_id, ledger_mod.policy_from_card(card),
-                           baseline=frozen["base"])
-    counts.update(dataset_rows=len(led.current), pending=len(led.pending))
-    counts.update(new=sum(c.kind == "new" for c in led.changes),
-                  updated=sum(c.kind == "updated" for c in led.changes))
-    if not frozen["base"]:
-        counts["new"] = len(led.current) - len([c for c in led.current if c.pending])
-    changed_keys = {c.label for c in led.changes} | {c.label for c in led.pending}
-    counts["unchanged"] = len([c for c in led.current if c.label not in changed_keys]) if frozen["base"] else 0
+    if revisions.layout_of(root) == 3:
+        from .index import prepare_view
+        _, view_state = prepare_view(root, rev.revision_id, ledger_mod.policy_from_card(card))
+        counts.update(view_state["counts"])
+    else:
+        led = ledger_mod.build(root, rev.revision_id, ledger_mod.policy_from_card(card),
+                               baseline=frozen["base"])
+        counts.update(dataset_rows=len(led.current), pending=len(led.pending))
+        counts.update(new=sum(c.kind == "new" for c in led.changes),
+                      updated=sum(c.kind == "updated" for c in led.changes))
+        if not frozen["base"]:
+            counts["new"] = len(led.current) - len([c for c in led.current if c.pending])
+        changed_keys = {c.label for c in led.changes} | {c.label for c in led.pending}
+        counts["unchanged"] = len([c for c in led.current if c.label not in changed_keys]) if frozen["base"] else 0
     run.status = COMPLETED
     run.checkpoint.update(revision=rev.revision_id, next_page=start if is_file else len(run.entries) + 1)
     revisions.save_run(root, run)
@@ -654,6 +713,28 @@ def resume(req: ResumeRequest, card=None, *, _operation=None):
         if target not in {c.get("id") for c in state["action"]["candidates"]}:
             raise InputError("请选择动作列出的目标", code="invalid_action")
         state["resolved_target"] = target
+    if state.get("action", {}).get("reason") == "structure_selection":
+        from .pipeline.structured import choose_structure, source_hash, structure_candidates
+        action = state["action"]
+        choice = req.action_response.get("candidate_id")
+        if choice not in {c["candidate_id"] for c in action.get("candidates", [])}:
+            raise InputError("请选择动作列出的结构候选", code="invalid_action")
+        card = revisions.restore_card(state.get("resolved_structure") or state["frozen"]["card"])
+        from .index import run_captures
+        for raw in run_captures(root, state["run_id"]):
+            ref = revisions.CaptureRef.from_dict(raw)
+            _, cap = revisions.read_capture(root, ref.capture_id)
+            if source_hash(cap) == action.get("source_hash"):
+                card = choose_structure(card, structure_candidates(cap, card), choice)
+                state["resolved_structure"] = revisions.card_config(card)
+                state["resolved_rule"] = revisions.write_rule(root, card).rule_id
+                state.setdefault("structure_selections", []).append({
+                    "capture_id": ref.capture_id, "candidate_id": choice,
+                    "source_hash": action["source_hash"], "rule_id": state["resolved_rule"]})
+                _save(root, state)
+                break
+        else:
+            raise InputError("结构选择对应的捕获不可用", code="stale_checkpoint")
     if state.get("status") == COMPLETED and state.get("operation") != "resolve":
         raise InputError("操作已完成；再次采集应创建新运行", code="operation_completed")
     if state.get("operation") == "reparse":
@@ -782,6 +863,8 @@ def export(req: ExportRequest, policy=None, *, _operation=None):
         raise InputError(f"不支持的导出格式：{req.format}", code="unsupported_format")
     if not req.out:
         raise InputError("export 需要 out")
+    if revisions.layout_of(root) == 3:
+        return _export_indexed(req, policy, state)
     target = Path(req.out).resolve()
     if "export" not in state:
         rows, fields, led = ledger_view(root, req.revision, req.baseline, req.view, policy,
@@ -828,10 +911,129 @@ def export(req: ExportRequest, policy=None, *, _operation=None):
         frozen.update(artifacts=artifacts, render_changes=[c.as_dict() for c in render.changes],
                       lossless=render.lossless)
         _save(root, state)  # all expected bytes are known before any target is replaced
+    return _publish_export(req, state, frozen)
+
+
+def file_digest(path):
+    with Path(path).open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _render_details(req, frozen, outputs):
+    reference = outputs.get("changes", "")
+    changes = frozen.get("render_changes", [])
+    if reference and req.detail == "full":
+        with Path(reference).open(encoding="utf-8") as stream:
+            changes = [json.loads(line) for line in stream]
+    return {"lossless": frozen["lossless"], "render_changes": changes,
+            "render_changes_ref": reference, "detail": req.detail,
+            "change_count": frozen.get("change_count", len(changes))}
+
+
+def query_view(root, revision_id="", baseline="", view="current", policy=None,
+               decision_set_id=None, *, limit=100, offset=0):
+    """Read a bounded page from the same indexed view used for export."""
+    from . import index
+    if view not in ("current", "history", "changes", "pending"):
+        raise InputError(f"没有这个视图 {view!r}")
+    if limit < 0 or offset < 0:
+        raise InputError("limit 和 offset 需要为非负整数")
+    with revisions.writer(root):
+        active = revisions.active(root)
+        rid = revision_id or active.get("revision_id", "")
+        if not rid:
+            raise InputError("还没有选中的版本")
+        pol = policy or default_policy(root, rid)
+        decisions = decision_set_id if decision_set_id is not None else (
+            active.get("decision_set_id", "") if rid == active.get("revision_id") else "")
+        identity, state = index.prepare_view(root, rid, pol, decisions)
+        if view == "changes" and (baseline != state["baseline"] or decisions or not state.get("changes_cached", True)):
+            rows, fields, _ = ledger_view(root, rid, baseline, view, pol, decisions)
+            return rows[offset:offset + limit], fields, state["counts"]
+        rows = list(index.view_rows(root, identity, view, limit=limit, offset=offset))
+        return rows, index.view_fields(state["fields"], view), state["counts"]
+
+
+def _export_indexed(req, policy, state):
+    from . import index
+    from .models import Row
+    from .render.xlsx import write_any
+    root = Path(req.dataset)
+    if req.detail not in ("full", "summary"):
+        raise InputError("detail 使用 full 或 summary")
+    if "export" not in state:
+        rid = req.revision or revisions.active(root).get("revision_id", "")
+        pol = policy or default_policy(root, rid)
+        active = revisions.active(root)
+        decisions = req.decision_set_id if req.decision_set_id is not None else (
+            active.get("decision_set_id", "") if rid == active.get("revision_id") else "")
+        view_id, view_state = index.prepare_view(root, rid, pol, decisions)
+        if req.view not in ("current", "history", "changes", "pending"):
+            raise InputError(f"没有这个视图 {req.view!r}")
+        if req.view == "changes" and not req.baseline:
+            raise InputError("看变化要给 baseline")
+        target = Path(req.out).resolve()
+        if target.exists() and not req.overwrite:
+            raise InputError(f"文件已存在：{target}", code="output_exists")
+        fields = index.view_fields(view_state["fields"], req.view)
+        if not req.include_metadata:
+            fields = [name for name in fields if not name.startswith("_")]
+        state["export"] = {"revision": rid, "policy": pol.as_dict(), "decisions": decisions,
+            "baseline": req.baseline, "baseline_decisions": req.baseline_decision_set_id,
+            "view": req.view, "fields": fields, "format": req.format, "target": str(target),
+            "previous_digest": file_digest(target) if target.exists() else None}
+        _save(root, state)
+    frozen = state["export"]
+    target = Path(frozen["target"])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if "artifacts" not in frozen:
+        pol = ledger_mod.LedgerPolicy.from_dict(frozen["policy"])
+        identity, view_state = index.prepare_view(root, frozen["revision"], pol, frozen["decisions"])
+        if frozen["view"] == "changes" and (frozen["baseline"] != view_state["baseline"] or frozen["baseline_decisions"]
+                                            or frozen["decisions"] or not view_state.get("changes_cached", True)):
+            rows = iter(ledger_view(root, frozen["revision"], frozen["baseline"], "changes", pol,
+                                   frozen["decisions"], frozen["baseline_decisions"])[0])
+        else:
+            rows = index.view_rows(root, identity, frozen["view"])
+        frozen["row_count"] = 0
+        def records():
+            for row in rows:
+                frozen["row_count"] += 1
+                yield Row(values={name: row.get(name, "") for name in frozen["fields"]})
+        temporary = target.with_name("." + target.name + "." + state["operation_id"] + ".tmp")
+        render = write_any(frozen["format"], records(), frozen["fields"], temporary, detail="summary")
+        artifacts = [{"kind": "file", "stage": str(temporary), "target": str(target),
+                      "previous_digest": frozen["previous_digest"]}]
+        def companion(kind, source, destination):
+            artifacts.append({"kind": kind, "stage": str(source), "target": str(destination),
+                              "previous_digest": file_digest(destination) if destination.exists() else None})
+        if render.companion:
+            companion("companion", render.companion, target.with_name(target.stem + ".full.jsonl"))
+        loss_path = getattr(render.changes, "path", None)
+        if loss_path and loss_path.exists():
+            companion("changes", loss_path, target.with_name(target.name + ".changes.jsonl"))
+        unparsed = temporary.with_name(temporary.name + ".unparsed.txt")
+        with unparsed.open("w", encoding="utf-8") as stream:
+            for entry in revisions.read_revision(root, frozen["revision"]).entries:
+                with (root / revisions.PARSES / entry["parse_id"] / "unparsed.txt").open(encoding="utf-8") as source:
+                    for line in source:
+                        stream.write(line.rstrip("\n") + "\n")
+        if unparsed.stat().st_size:
+            companion("unparsed", unparsed, target.with_name(target.name + ".unparsed.txt"))
+        else:
+            unparsed.unlink()
+        for artifact in artifacts:
+            artifact["sha256"] = file_digest(artifact["stage"])
+        frozen.update(artifacts=artifacts, lossless=render.lossless, change_count=len(render.changes))
+        _save(root, state)
+    return _publish_export(req, state, frozen)
+
+
+def _publish_export(req, state, frozen):
     outputs = {}
     for artifact in frozen["artifacts"]:
         dest, stage = Path(artifact["target"]), Path(artifact["stage"])
-        actual = hashlib.sha256(dest.read_bytes()).hexdigest() if dest.exists() else None
+        actual = file_digest(dest) if dest.exists() else None
         if actual != artifact["sha256"]:
             if actual != artifact["previous_digest"]:
                 raise InputError(f"目标文件被其他操作修改：{dest}", code="output_conflict")
@@ -843,8 +1045,8 @@ def export(req: ExportRequest, policy=None, *, _operation=None):
         outputs[artifact["kind"]] = str(dest)
         outputs["sha256" if artifact["kind"] == "file" else artifact["kind"] + "_sha256"] = artifact["sha256"]
     return OperationResult(operation="export", outputs=outputs,
-                           counts={"rows": len(frozen["rows"]), "fields": len(frozen["fields"])},
-                           data={"lossless": frozen["lossless"], "render_changes": frozen["render_changes"]},
+                           counts={"rows": frozen.get("row_count", len(frozen.get("rows", []))), "fields": len(frozen["fields"])},
+                           data=_render_details(req, frozen, outputs),
                            checkpoint={"revision": frozen["revision"], "view": frozen["view"],
                                        "policy_id": frozen["policy"]["policy_id"],
                                        "decision_set_id": frozen["decisions"], "baseline": frozen["baseline"],
@@ -918,4 +1120,4 @@ def operation_status(req: ResumeRequest):
 __all__ = ["API_VERSION", "STATUSES", "NEEDS_ACTION", "ACTION_REASONS", "OperationResult",
            "Request", "PreviewRequest", "ExecuteRequest", "ResumeRequest", "ReparseRequest",
            "CompareRequest", "SelectRequest", "ExportRequest", "preview", "execute",
-           "resume", "reparse", "compare", "select_revision", "ledger_view", "export", "resolve", "operation_status"]
+           "resume", "reparse", "compare", "select_revision", "ledger_view", "query_view", "export", "resolve", "operation_status"]

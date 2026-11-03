@@ -63,3 +63,31 @@ class RenderResult:
 
 def lossless(path: str | Path) -> RenderResult:
     return RenderResult(path=Path(path))
+
+
+class ChangeLog:
+    """Stream loss details and original values into companion files."""
+    def __init__(self, path):
+        self.path = path.with_name(path.name + ".changes.jsonl")
+        self.companion = path.with_name(path.stem + ".full.jsonl")
+        self.count = 0
+
+    def append(self, change):
+        import json
+        mode = "w" if self.count == 0 else "a"
+        with self.path.open(mode, encoding="utf-8") as stream:
+            stream.write(json.dumps(change.as_dict(), ensure_ascii=False) + "\n")
+        with self.companion.open(mode, encoding="utf-8") as stream:
+            stream.write(json.dumps({"row": change.row, "field": change.field, "kind": change.kind,
+                                    "detail": change.detail, "value": change.original}, ensure_ascii=False) + "\n")
+        self.count += 1
+
+    def __len__(self):
+        return self.count
+
+    def __iter__(self):
+        import json
+        if self.count:
+            with self.path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    yield Change(**json.loads(line))

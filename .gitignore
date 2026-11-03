@@ -27,6 +27,8 @@ _dev/*
 # 例外：release.yml 是唯一一份「写错了本地不红、只在推标签那一刻红」的文件，
 # 它的检查脚本得留在仓库里，否则等于没人检查。
 !_dev/check_release_workflow.py
+!_dev/benchmark_storage.py
+!_dev/check_sessions.py
 
 # v1 评审原件（70KB）。被否掉的方案已经提炼进 docs/design-notes.md，
 # 原件留着只会让读者以为它还在生效。

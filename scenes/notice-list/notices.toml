@@ -1,0 +1,29 @@
+schema = 2
+name = "notice-ledger"
+channel = "browser"
+[segment]
+mode = "dom"
+region = "#notices"
+records = "article.notice"
+[fields.id]
+kind = "dom"
+sel = '.id'
+[fields.title]
+kind = "dom"
+sel = '.title'
+[fields.date]
+kind = "dom"
+sel = '.date'
+[fields.body]
+kind = "dom"
+sel = '.body'
+[fields.link]
+kind = "dom"
+sel = '.link'
+[dedupe]
+key = ["id"]
+mutable = ["title", "date", "body", "link"]
+[ledger]
+sort = "business_time"
+field = "date"
+timezone = "Asia/Shanghai"

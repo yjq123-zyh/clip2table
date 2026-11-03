@@ -77,6 +77,7 @@
 |---|---|
 | `ladder.py` | 三档降级：A 直连 → B 浏览器 → C 桌面。**判定依据必须可报告** |
 | `channels/http.py` | 直连取页面 |
+| `channels/session.py` | 单次与分页共用的会话、导航等待、恢复和连接释放 |
 | `channels/cdp.py` | Chrome DevTools Protocol 客户端（手写 WebSocket 之上的最小封装） |
 | `channels/ws.py` | WebSocket 帧编解码（RFC6455，仅文本帧，零依赖） |
 | `channels/keyboard.py` | Win32 按键：`SetForegroundWindow`、`SendInput`、焦点记录与归还、窗口身份校验 |
@@ -178,8 +179,7 @@ CLI 按数据布局选择写入路径：
 ### 卡声明的东西必须能执行
 
 `capabilities.py` 是一张表，`cards validate`、实际分发、`cards show` 三处共用它。
-所以"卡里写了 `kind = "dom"` 但这个版本做不到"会在校验阶段就被拒绝，
-而不是运行时静默返回空。
+结构卡使用 schema 2，校验记录路径、区域和字段规则。
 
 ---
 
@@ -261,8 +261,11 @@ data/mysite/
 ├── captures/<capture_id>/       # source.<txt|html|json> + meta.json
 ├── rules/<rule_id>.json         # 解析规则快照
 ├── parses/<parse_id>/           # rows.jsonl + unparsed.txt + meta.json
-├── revisions/<revision_id>.json # 累计 capture→parse 清单及完整性
-├── runs/<run_id>.json           # 冻结配置、已提交引用及检查点
+├── revisions/<revision_id>.json # 父版本、增量、摊还快照及完整性
+├── runs/<run_id>.json           # 冻结配置、累计计数及检查点
+├── runs/<run_id>/*.json         # 不可变页提交记录
+├── events/                     # 全局提交序号及对象引用
+├── views/index.sqlite3         # 可重建的对象、版本成员与业务视图索引
 ├── operation-state/<op-id>.json # 操作进度、输入绑定及已完成结果
 ├── operations/<request-hash>.json # 请求回执
 ├── decisions/<set-id>.json      # 不可变人工决定集合
@@ -296,7 +299,20 @@ data/mysite/
 
 ---
 
-## 5. 报告：先写怎么拿到的
+## 5. 增量布局与查询
+
+`index.py` 使用标准库 sqlite3。捕获、解析、修订和选择先写对象与有序事件，索引事务记录已应用序号；重启时补入后续事件。索引格式与初始化标记独立记录，初始化中断可重新构建。
+
+修订逻辑上累积 capture→parse 关系，物理上写父引用与 delta。首次快照阈值为 128 项，后续阈值按上次快照规模翻倍；替换编辑累计达到当前成员数时也生成快照。
+运行头保存冻结配置和计数，逐页提交写入独立文件；运行结束保存引用快照，再次读取直接重载快照。写入中断时按页记录补齐引用和累计行数。
+
+台账索引按策略缓存观察、实体和当前视图版本，并记录决定集合。新增、重算或人工决定只重建受影响主键，业务判断复用 `ledger.py`。切换决定集合时通过待处理 ID 索引定位关联实体。
+切换历史版本时沿修订链恢复；`ledger_view` 提供完整列表，`query_view` 有界返回。
+
+导出状态固定查询与产物清单。格式损失逐项写入伴随文件，持久化回执保存引用；full 响应读取该文件还原明细。
+索引重建使用同一数据集写锁，业务事实和 active 选择保持在独立记录中。
+
+## 6. 报告：先写怎么拿到的
 
 报告第一行固定是通道、引擎、判定依据；第二行是来源——而且来源有三种形态：
 读到的就是这个地址 / 落地地址与请求不同（会把请求地址也写出来）/ 桌面通道读不到地址栏
@@ -306,9 +322,9 @@ data/mysite/
 
 ---
 
-## 6. 测试
+## 7. 测试
 
-`tests/` 按模块切分；当前全量 666 项通过（`python -m unittest discover -s tests -t .`）。
+`tests/` 按模块切分，运行 `python -m unittest discover -s tests -t .`；验证记录见 [verification.md](verification.md)。
 有三类测试值得单独说：
 
 - **守恒类**：任意输入下 `rows + unparsed == 源行数`。

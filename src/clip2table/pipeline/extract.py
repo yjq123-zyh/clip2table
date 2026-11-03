@@ -4,12 +4,12 @@ Every field uses one of a closed set of primitives. There is no eighth
 primitive, and nothing here invents a value: a field the source does not
 contain stays None.
 
-  dom    - rendered-DOM selector (browser channel only)
+  dom    - relative selector in a saved HTML record
   cell   - a table column (HTML table / TSV). Column edges are facts.
   line   - the nth line of the record (negative counts from the end)
   search - the line matching a pattern, then a capture group
   span   - the text between two markers, possibly across lines
-  json   - a dotted path into a parsed JSON document
+  json   - a pointer relative to a JSON object record
   const  - a fixed value, for provenance labels only, never to fill data
 """
 from __future__ import annotations
@@ -49,6 +49,7 @@ class FieldSpec:
     # dom
     sel: str | None = None
     attr: str = "text"
+    match: str = "unique"
 
     # json
     path: str | None = None
@@ -90,6 +91,8 @@ class FieldSpec:
                         f"只能用 line:/after:/before:，末尾加 ? 表示找不到时不算错")
         if self.kind == "const" and self.value is None:
             raise ValueError(f"字段 {self.name} 用 const 但没给 value")
+        if self.match not in ("unique", "first"):
+            raise ValueError("match 必须是 unique 或 first")
         if self.scope not in ("record", "head", "tail"):
             raise ValueError(f"字段 {self.name} 的 scope={self.scope!r} 不认识")
         if self.on_range not in ("reject", "first", "last"):
@@ -116,6 +119,10 @@ class FieldSpec:
             base = f"span {self.start or '记录开头'} → {self.end or '记录结尾'}"
         elif self.kind == "const":
             base = f"const {self.value!r}"
+        elif self.kind == "json":
+            base = f"json path={self.path!r}"
+        elif self.kind == "dom":
+            base = f"dom sel={self.sel!r} attr={self.attr!r} match={self.match}"
         else:
             base = self.kind
         extra = []

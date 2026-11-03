@@ -1,0 +1,15 @@
+schema = 1
+id = "notice-list"
+version = "1.0.0"
+maintainer = "yjq123-zyh"
+min_clip2table = "0.4.0"
+card_schema = [2]
+capabilities = ["dom"]
+cards = ["notices.toml"]
+[[samples]]
+name = "notice-current"
+card = "notices.toml"
+kind = "html"
+inputs = ["input/page-1.html", "input/page-2.html"]
+view = "current"
+expected = "output/expected-current.csv"

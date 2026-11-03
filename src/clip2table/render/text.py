@@ -51,11 +51,11 @@ def write_md(rows: list[Row], fields: list[str],
     # The header goes through the same escaping as the body. A field named
     # `a|b` used to shift every column one cell to the right: the data was
     # fine, the table was not.
-    lines = ["| " + " | ".join(_md_cell(f) for f in fields) + " |",
-             "| " + " | ".join("---" for _ in fields) + " |"]
-    for r in rows:
-        lines.append("| " + " | ".join(_md_cell(r.values.get(k)) for k in fields) + " |")
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with p.open("w", encoding="utf-8", newline="") as stream:
+        stream.write("| " + " | ".join(_md_cell(f) for f in fields) + " |\n")
+        stream.write("| " + " | ".join("---" for _ in fields) + " |\n")
+        for row in rows:
+            stream.write("| " + " | ".join(_md_cell(row.values.get(k)) for k in fields) + " |\n")
     return lossless(p)
 
 

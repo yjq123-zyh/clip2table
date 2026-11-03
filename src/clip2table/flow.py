@@ -191,7 +191,7 @@ def open_dataset(args, card, channel: str | None = None, raw: str = ""):
         # be replayed, which is backwards. Existing v1 directories are left
         # exactly as they are: adopting them is an explicit operation.
         revisions.init(path)
-    if revisions.layout_of(path) == 2:
+    if revisions.layout_of(path) in (2, 3):
         run = revisions.new_run(path, task=card.name, kind="collect",
                                 base_revision=revisions.active(path).get("revision_id"))
         publisher = revisions.Publisher(path, card, run=run,

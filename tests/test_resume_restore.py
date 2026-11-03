@@ -158,7 +158,7 @@ class TestHarvestPagesRestoresFirst(unittest.TestCase):
 
         class Cl:
             def eval(self, expr, await_promise=False):
-                return "http://x/list?p=4"
+                return "complete" if expr == "document.readyState" else "http://x/list?p=4"
 
             def close(self):
                 pass

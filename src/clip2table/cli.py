@@ -21,7 +21,7 @@ from .cards.schema import Card
 from .core import _text_of as _text_of_cap, parse_capture
 from .errors import BAD_INPUT, OK, ChannelError, Clip2TableError, InputError
 from .flow import Totals, finish, open_dataset, run_report_fields
-from .models import Captured
+from .models import Captured, ParseResult
 from .pipeline.normalize import normalize_text, to_lines
 from .report import Report, sample_block
 from .render.text import write_md
@@ -61,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="改为按地址取：自动按 A→B→C 找一条能用的通道")
     run_p.add_argument("--text-file", default=None, help="改为读文本文件，不读剪贴板")
     run_p.add_argument("--html-file", default=None, help="改为读 HTML 文件")
+    run_p.add_argument("--json-file", default=None, help="读取 JSON 文件")
     run_p.add_argument("--show", type=int, default=3, help="打印前 N 条解析结果")
 
     har_p = sub.add_parser(
@@ -89,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     common(inf_p)
     inf_p.add_argument("--text-file", default=None)
     inf_p.add_argument("--html-file", default=None)
+    inf_p.add_argument("--json-file", default=None, help="读取 JSON 文件")
     inf_p.add_argument("--show", type=int, default=3)
     inf_p.add_argument("--write-card", default=None,
                        help="把推断出的卡草案写到这个路径")
@@ -130,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="已有的卡：改成任务（补 [task] 段）而不是重新推断")
     new_p.add_argument("--text-file", default=None, help="样本文本文件")
     new_p.add_argument("--html-file", default=None, help="样本 HTML 文件")
+    new_p.add_argument("--json-file", default=None, help="读取 JSON 文件")
     new_p.add_argument("--url", default=None, help="样本来源地址（会真去取一次）")
     new_p.add_argument("--source", default=None,
                        help="再次采集的 URL（可含 {page}）或桌面窗口标题正则")
@@ -158,6 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     chk_p.add_argument("card")
     chk_p.add_argument("--text-file", default=None, help="改看这个样本，不重新取数")
     chk_p.add_argument("--html-file", default=None)
+    chk_p.add_argument("--json-file", default=None, help="读取 JSON 文件")
     chk_p.add_argument("--rows", type=int, default=8, help="打印几条记录")
     chk_p.add_argument("--lines", type=int, default=0,
                        help="另外打印原文的前 N 行（0 = 不打印）")
@@ -186,6 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="标出第 1 条记录中的值，读取它所在的整行")
     fix_p.add_argument("--text-file", default=None, help="在这份样本上验证")
     fix_p.add_argument("--html-file", default=None)
+    fix_p.add_argument("--json-file", default=None, help="读取 JSON 文件")
     fix_p.add_argument("--write", action="store_true",
                        help="确认改动无误后真正写回卡文件")
     fix_p.add_argument("--rows", type=int, default=5)
@@ -197,6 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
     run2_p.add_argument("--url", default=None)
     run2_p.add_argument("--text-file", default=None)
     run2_p.add_argument("--html-file", default=None)
+    run2_p.add_argument("--json-file", default=None, help="读取 JSON 文件")
     run2_p.add_argument("--max-pages", type=int, default=None)
     run2_p.add_argument("--port", type=int, default=None)
     run2_p.add_argument("--yes", action="store_true")
@@ -241,7 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
     rev_adopt = rev_sub.add_parser(
         "adopt", help="把旧数据集的一页登记成新布局的捕获与解析结果")
     rev_adopt.add_argument("-d", "--dataset", required=True)
-    rev_adopt.add_argument("page", type=int)
+    rev_adopt.add_argument("page", type=int, nargs="?")
     rev_adopt.add_argument("--kind", default="",
                            help="这一页当时是 text 还是 html（旧数据没记，必须由人指定）")
     rev_adopt.add_argument("--json", action="store_true")
@@ -305,6 +311,12 @@ def _capture_from_args(args) -> tuple[Captured, str]:
             raise InputError(f"找不到文件：{p}")
         return Captured(kind="text", payload=p.read_text(encoding="utf-8", errors="replace"),
                         channel="file", engine=None, formats=["file"]), ""
+    if getattr(args, "json_file", None):
+        p = Path(args.json_file)
+        if not p.is_file():
+            raise InputError(f"找不到文件：{p}")
+        return Captured(kind="json", payload=p.read_bytes().decode("utf-8"),
+                        channel="file", formats=["file"]), ""
     if getattr(args, "html_file", None):
         p = Path(args.html_file)
         if not p.exists():
@@ -433,11 +445,12 @@ def _run_dataset_api(args, card, *, single=False, tasks=None, started=None) -> i
         result = api.operation_status(resume_request) if getattr(args, "dry_run", False) else api.resume(resume_request)
     else:
         capture = {}
-        if single and not any(getattr(args, k, None) for k in ("text_file", "html_file", "url")):
+        if single and not any(getattr(args, k, None) for k in ("text_file", "html_file", "json_file", "url")):
             capture = dataclasses.asdict(_capture_from_args(args)[0])
         request = api.ExecuteRequest(
             request_id=getattr(args, "request_id", ""), dataset=root,
             text_file=getattr(args, "text_file", "") or "",
+            json_file=getattr(args, "json_file", "") or "",
             html_file=getattr(args, "html_file", "") or "", url=getattr(args, "url", "") or "",
             max_pages=1 if single else getattr(args, "max_pages", None),
             port=getattr(args, "port", None), allow_force=getattr(args, "force", False),
@@ -773,7 +786,7 @@ def cmd_infer(args) -> int:
 
 def _export_dataset(args) -> int:
     from . import revisions, api
-    if revisions.layout_of(args.dataset) == 2:
+    if revisions.layout_of(args.dataset) in (2, 3):
         rid = revisions.active(args.dataset).get("revision_id", "")
         return _export_ledger_api(args, rid, api.default_policy(args.dataset, rid), include_metadata=False)
     """Re-emit an existing dataset. Never re-collects: same input, same table."""
@@ -870,13 +883,17 @@ def cmd_rev(args) -> int:
     sub = getattr(args, "rev_cmd", None)
     root = Path(args.dataset)
     if sub == "adopt" and getattr(args, "source", ""):
+        if revisions.layout_of(args.source) in (2, 3) and args.page is None:
+            meta = revisions.adopt_dataset(args.source, root)
+            print(json.dumps(meta, ensure_ascii=False, indent=2) if args.json else f"已采用到 {root}（布局 3）")
+            return OK
         if Path(args.source).resolve() == root.resolve():
             raise InputError("--source 与目标 -d 应使用不同目录")
         revisions.init(root)
     if not root.is_dir():
         raise InputError(f"没有这个目录：{root}",
                          hint="rev 用的是某个 dataset 目录，不是卡文件")
-    if revisions.layout_of(root) != 2 and sub != "legacy":
+    if revisions.layout_of(root) not in (2, 3) and sub != "legacy":
         raise InputError(
             f"{root} 还是旧布局，没有结果版本",
             hint="旧数据继续按原样读写；要看版本目录得先用这个版本采一次"
@@ -1019,6 +1036,8 @@ def cmd_rev(args) -> int:
         return OK
 
     if sub == "adopt":
+        if args.page is None:
+            raise InputError("采用旧页面需要页号，采用完整版本数据集使用 --source")
         cref, pref = revisions.adopt_legacy_page(
             root, args.source or root, args.page, assume_kind=args.kind)
         with revisions.writer(root):
@@ -1045,7 +1064,7 @@ def cmd_replay(args) -> int:
     root = Path(args.dataset)
     if not root.is_dir():
         raise InputError(f"没有这个目录：{root}")
-    if revisions.layout_of(root) != 2:
+    if revisions.layout_of(root) not in (2, 3):
         raise InputError(f"{root} 还是旧布局，没有可以重解析的原文记录",
                          hint="重解析要存了原文和规则快照才做得到；旧页只能逐页登记")
     base = args.base or revisions.active(root).get("revision_id") or ""
@@ -1125,7 +1144,7 @@ def cmd_ledger(args) -> int:
     root = Path(args.dataset)
     if not root.is_dir():
         raise InputError(f"没有这个目录：{root}")
-    if revisions.layout_of(root) != 2:
+    if revisions.layout_of(root) not in (2, 3):
         raise InputError(f"{root} 还是旧布局，没有结果版本",
                          hint="台账读的是结果版本；旧数据请继续用 export -d")
 
@@ -1135,6 +1154,14 @@ def cmd_ledger(args) -> int:
                          hint=f"clip2table rev list -d {root}")
 
     policy = _ledger_policy(args, root, rid)
+    if args.format or args.out:
+        return _export_ledger_api(args, rid, policy)
+    if revisions.layout_of(root) == 3 and not args.json:
+        rows, fields, counts = api.query_view(root, rid, args.baseline or "", args.view, policy,
+                                             limit=max(1, args.show))
+        _print_table(rows, fields, limit=max(1, args.show))
+        print(f"版本 {rid}（{counts['dataset_rows']} 个实体）")
+        return OK
     rows, fields, led = api.ledger_view(root, rid, args.baseline or "",
                                         args.view, policy)
 
@@ -1210,7 +1237,7 @@ def _export_ledger_api(args, rid, policy, *, include_metadata=True):
             dataset=str(args.dataset), revision=rid,
             baseline=getattr(args, "baseline", "") or "",
             view=getattr(args, "view", "current"), format=fmt, out=str(target),
-            overwrite=True, include_metadata=include_metadata), policy)
+            overwrite=True, include_metadata=include_metadata, detail="summary"), policy)
         _require_ok(result)
         if getattr(args, "json", False):
             print(result.to_json())
@@ -1431,8 +1458,22 @@ def _task_check(args, taskflow) -> int:
         raise InputError("确认候选前需要加 --write 保存该规则")
     cap, _why = _capture_from_args(args)
     lines = to_lines(normalize_text(_text_of_cap(cap)))
-    res, inf = parse_capture(cap, card)
-    if inf is None:
+    structural = card.segment_mode in ("json", "dom")
+    candidates = []
+    issue = ""
+    if structural:
+        from .pipeline.structured import structure_candidates, choose_structure
+        candidates = structure_candidates(cap, card)
+        if args.pick:
+            card = choose_structure(card, candidates, args.pick)
+    try:
+        res, inf = parse_capture(cap, card)
+    except ChannelError as error:
+        if not structural or error.reason != "structure_selection" or args.pick or not candidates:
+            raise
+        res, inf = ParseResult(rows=[], fields=card.field_names), None
+        issue = str(error)
+    if inf is None and card.segment_mode not in ("json", "dom"):
         # A card decides its own boundary, so `parse_capture` returns no infer
         # result -- and the candidate list then had nothing to show exactly
         # where a user needs it most, on a card whose boundary is wrong. Ask
@@ -1444,7 +1485,9 @@ def _task_check(args, taskflow) -> int:
         except Clip2TableError:
             inf = None
     picked: dict[str, object] = {}
-    if getattr(args, "pick", 0):
+    if structural and args.pick:
+        picked = {"pick": args.pick, "segment": candidates[args.pick - 1]["segment"], "rows": len(res.rows)}
+    if not structural and getattr(args, "pick", 0):
         # "Try the second reading" has to be one flag, not a new rule the user
         # writes: the alternates are already numbered in the text above.
         alts = (inf.alternates if inf is not None else [])
@@ -1472,12 +1515,16 @@ def _task_check(args, taskflow) -> int:
         _rewrite_section(args.card, lambda line: bool(re.match(r"^\s*\[\s*segment\s*\]", line)),
                          emit.segment_block(card)[1:], cap=cap, expected=res)
         tasks.record_fix(tasks.stats_path(_card_path_for_stats(card, args.card)),
-                         field="[segment]", kind="periodic", detail=str(picked))
+                         field="[segment]", kind=card.segment_mode, detail=str(picked))
     import hashlib
     from .dataset import _card_fingerprint
     card_hash = hashlib.sha256(json.dumps(_card_fingerprint(card), sort_keys=True,
                                          ensure_ascii=False).encode()).hexdigest()
-    sample_hash = hashlib.sha256(normalize_text(_text_of_cap(cap)).encode()).hexdigest()
+    if structural:
+        from .pipeline.structured import source_hash
+        sample_hash = source_hash(cap)
+    else:
+        sample_hash = hashlib.sha256(normalize_text(_text_of_cap(cap)).encode()).hexdigest()
     stats_file = tasks.stats_path(_card_path_for_stats(card, args.card))
     if args.confirm:
         confirmation = tasks.record_confirm(stats_file, rows=len(res.rows),
@@ -1494,16 +1541,20 @@ def _task_check(args, taskflow) -> int:
             for f in res.fields:
                 t = r.traces.get(f)
                 per[f] = {"value": r.values.get(f),
-                          "line": preview.source_of(r, t)}
+                          "line": preview.source_of(r, t),
+                          "locator": t.locator if t else {},
+                          "status": t.status if t else "missing"}
             sources.append(per)
         print(json.dumps({
             "card": card.name, "rows": len(res.rows), "fields": res.fields,
+            **({"status": "needs_action" if issue else "completed", "message": issue,
+                "candidates": candidates} if structural else {}),
             "unparsed": len(res.unparsed),
             "conservation": res.check_conservation(),
             "samples": [{f: r.values.get(f) for f in res.fields}
                         for r in res.rows[:args.rows]],
             "sources": sources,
-            "fill_rates": res.fill_rates, "deviations": res.deviations,
+            "fill_rates": res.fill_rates, "deviations": res.deviations, "coverage": res.coverage,
             "deviation_rows": res.deviation_rows,
             "confirmed": confirmed, "saved": bool(args.write),
             "alternates": [a.line() for a in (inf.alternates if inf else [])],
@@ -1511,6 +1562,12 @@ def _task_check(args, taskflow) -> int:
         }, ensure_ascii=False, indent=2))
         return OK
 
+    if structural and not args.pick:
+        if issue:
+            print(issue)
+        print("结构候选（--pick N 预览，--pick N --write 保存）：")
+        for candidate in candidates:
+            print(f"  {candidate['index']}. {candidate['segment']} → {candidate['records']} 条候选记录")
     body = taskflow.preview_text(res, lines, rows=args.rows,
                                 source_lines=args.lines, field=args.field)
     for line in body:
@@ -1526,6 +1583,9 @@ def _task_check(args, taskflow) -> int:
     cons = res.check_conservation()
     if cons:
         print(f"\n✗ {cons}")
+    elif res.coverage:
+        c = res.coverage
+        print(f"\n记录覆盖：候选 {c['candidates']}，已解析 {c['parsed']}，待处理 {len(c['pending'])}，去重 {c['deduplicated']}")
     else:
         print(f"\n✓ 行数守恒：{res.total_lines} 行全部有归属"
               f"（记录 {len(res.rows)} + 未识别 {len(res.unparsed)}）")
@@ -1757,14 +1817,14 @@ def _task_run(args, tasks) -> int:
     if dataset:
         if _uses_api(args):
             return _run_dataset_api(args, card,
-                                    single=bool(args.text_file or args.html_file or args.url),
+                                    single=bool(args.text_file or args.html_file or args.json_file or args.url),
                                     tasks=tasks, started=started)
         import io
         from contextlib import redirect_stdout, nullcontext
         output = io.StringIO()
         try:
             with redirect_stdout(output) if args.json else nullcontext():
-                rc = (cmd_run(args) if args.text_file or args.html_file or args.url
+                rc = (cmd_run(args) if args.text_file or args.html_file or args.json_file or args.url
                       else cmd_harvest(args))
         except Clip2TableError as exc:
             if not args.dry_run:
@@ -1806,7 +1866,7 @@ def _task_run(args, tasks) -> int:
             print(f"· 任务记录没能写入 {p}（目录只读或被占用），这次运行没有记进台账")
         return rc
 
-    if args.text_file or args.html_file or args.url:
+    if args.text_file or args.html_file or args.json_file or args.url:
         # One sample, no dataset: parse it, but do not record it as a run - the
         # track record would then mix previews with real harvests.
         return _task_run_sample(args, card, tasks, started)
@@ -1836,9 +1896,12 @@ def _task_run_sample(args, card, tasks, started) -> int:
 
 
 def cmd_test(args) -> int:
-    from .cards.regress import test_card
-    card = resolve_card(args.card)
-    rep = test_card(card)
+    from .cards.regress import test_card, test_scene
+    if args.card.startswith("scene:") or Path(args.card).name == "scene.toml":
+        rep = test_scene(args.card)
+    else:
+        card = resolve_card(args.card)
+        rep = test_card(card)
     if args.json:
         print(json.dumps({
             "card": rep.card,

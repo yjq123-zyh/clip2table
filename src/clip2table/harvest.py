@@ -20,13 +20,13 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
 
 from .cards.schema import Card
 from .channels import cdp as cdp_mod
 from .channels import keyboard as kb
 from .channels.clipboard import read_clipboard, sequence_number
 from .errors import ChannelError, InputError
+from .channels.session import can_restore, restore_to, advance as _advance
 from .models import Captured, ParseResult
 
 
@@ -72,6 +72,7 @@ class MultiRound:
     stopped_code: str = ""
     pages_done: int = 0
     new_per_page: list[int] = field(default_factory=list)
+    collected: int = 0
     repeat_of: int | None = None     # page number this run repeated, if any
 
     @property
@@ -131,6 +132,23 @@ def harvest_browser(card: Card, page: int = 1, port: int | None = None,
         target_url = str(target.get("url", ""))
     try:
         notes: list[str] = []
+
+        if card.segment_mode == "dom":
+            from .pipeline.structured import Document, select
+            deadline = time.monotonic() + int(harvest.get("timeout_ms", 3000)) / 1000
+            while True:
+                _check_page_usable(client, notes)
+                _check_challenge(client, notes)
+                payload = str(client.eval("document.documentElement.outerHTML") or "")
+                regions = select(Document(payload).root, card.segment_region)
+                if regions or time.monotonic() >= deadline:
+                    observed = str(client.eval("location.href") or target_url)
+                    cap = Captured(kind="html", payload=payload, channel="browser", engine="E1",
+                                   requested_url=str((card.target or {}).get("url") or ""),
+                                   observed_url=observed, source_url=observed, formats=["dom"])
+                    return Round(cap, page=page, engine="E1", channel="browser",
+                                 why=f"DOM 快照 → {observed[:80]}")
+                time.sleep(0.05)
 
         # Whoever is in front right now gets the foreground back afterwards.
         # Recorded unconditionally because bringToFront may take it (measured
@@ -614,83 +632,6 @@ def _url_hint(card: Card) -> str | None:
 
 # --------------------------------------------------------------------- http
 
-def can_restore(card: Card) -> tuple[bool, str]:
-    """Whether this card can put the interface back where page N was.
-
-    This is a property of the CARD, not the channel. "browser is resumable" was
-    true only for lists with an addressable page URL; for a dynamic list whose
-    URL never changes, saying "resume from page 4" is a claim the code cannot
-    keep -- it copies whatever the tab happens to show and files it as page 4.
-
-    Returns (ok, why). `why` is written for the user, not for a log.
-    """
-    if card.channel == "http":
-        if "{page}" in str((card.fetch or {}).get("url") or ""):
-            return True, "直连卡有 {page} 占位符，第 N 页就是一次 GET"
-        return False, "直连卡的 [fetch].url 里没有 {page} 占位符，只能取一页"
-    if card.channel == "browser":
-        if card.paging_url_template:
-            return True, f"浏览器卡有 url_template，可以直接导航到第 N 页"
-        if card.paging_style == "click":
-            return False, ("浏览器卡的列表地址不随页码变化，翻页只能点「下一页」；"
-                           "没有 url_template 就无法确认标签页现在停在第几页")
-        return False, "浏览器卡没有 [paging].url_template，无法导航到指定页"
-    return False, f"{card.channel} 通道读不到当前界面位置，无法自动恢复"
-
-
-def restore_to(client: cdp_mod.CDP, card: Card, page: int,
-               notes: list[str] | None = None) -> str:
-    """Navigate the tab to page `page` and prove it landed there.
-
-    Only the URL-template path is implemented, because it is the only one that
-    can be VERIFIED: after `Page.navigate` the address bar is read back and
-    compared with what was asked for. Clicking "next" N-1 times cannot prove
-    anything -- if the tab was already on page 3, three clicks land on page 6
-    and the rows get filed as page 4.
-    """
-    notes = notes if notes is not None else []
-    tmpl = card.paging_url_template
-    if not tmpl:
-        raise InputError(
-            f"卡 {card.name!r} 没有 [paging].url_template，无法恢复到第 {page} 页",
-            hint="在卡里加 url_template = \"https://.../list?page={page}\"，"
-                 "或者用 --append-from-here 从当前屏幕接着采")
-    want = tmpl.replace("{page}", str(page))
-    client.call("Page.navigate", {"url": want})
-    deadline = time.monotonic() + 20.0
-    seen = ""
-    while time.monotonic() < deadline:
-        time.sleep(0.2)
-        try:
-            seen = str(client.eval("location.href") or "")
-        except Exception:            # navigation tears down the old context
-            continue
-        ready = False
-        try:
-            ready = str(client.eval("document.readyState") or "") == "complete"
-        except Exception:
-            continue
-        if ready and seen:
-            break
-    if not seen:
-        raise ChannelError(
-            f"导航到第 {page} 页（{want[:80]}）之后读不到地址栏",
-            hint="确认标签页还在、没有被关闭或跳走",
-            reason="resume_position_confirmation")
-    # Same page means same path+query; the fragment is not part of the address
-    # of a page in a list, so a hash difference must not fail the check.
-    want_key = urlsplit(want)
-    got_key = urlsplit(seen)
-    if (want_key.scheme, want_key.netloc, want_key.path, want_key.query) != \
-            (got_key.scheme, got_key.netloc, got_key.path, got_key.query):
-        raise ChannelError(
-            f"想恢复到第 {page} 页，导航到了 {seen[:80]}，不是 {want[:80]}",
-            hint="站点可能重定向了；用 --append-from-here 明确从当前屏幕接着采",
-            reason="resume_position_confirmation")
-    notes.append(f"已导航到第 {page} 页：{want[:80]}")
-    return seen
-
-
 def harvest_http(card: Card, page: int = 1, timeout: float = 8.0) -> Round:
     """Channel A: GET the page and parse the response. No keys, no windows.
 
@@ -743,7 +684,8 @@ def harvest_http(card: Card, page: int = 1, timeout: float = 8.0) -> Round:
             hint="这条站点要靠登录态或 JS 渲染，换 browser 通道"
                  "（channel = \"browser\"），或直接用 desktop 通道")
 
-    cap = Captured(kind="html" if "<" in result.body[:200] else "text",
+    kind = "json" if "json" in result.content_type.lower() else "html" if "<" in result.body[:200] else "text"
+    cap = Captured(kind=kind,
                    payload=result.body, source_url=result.url,
                    # `url` here is already page-substituted. Comparing the raw
                    # `.../plain/{page}` template against a real address would
@@ -762,7 +704,7 @@ def harvest_http(card: Card, page: int = 1, timeout: float = 8.0) -> Round:
 
 def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
                   allow_force: bool = False, start_page: int = 1,
-                  on_page=None, on_capture=None, positioned: bool = False) -> MultiRound:
+                  on_page=None, on_capture=None, positioned: bool = False, retain_rounds: bool = True) -> MultiRound:
     """Collect up to max_pages, stopping on any of four honest signals.
 
     "Reached max_pages" alone is a bad stop signal: it means the tool kept
@@ -793,52 +735,24 @@ def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
     if max_pages < 1:
         raise InputError("--max-pages 至少是 1")
 
-    client = None
-    target_url = ""
-    seen: set[str] = set()
     empty_streak = 0
     fingerprints: dict[str, int] = {}
     empty_limit = max(1, int(getattr(card, "stop_after_empty", 2) or 2))
     use_empty_stop = str(getattr(card, "stop_when", "fingerprint")) != "fingerprint"
 
-    def ensure_client() -> cdp_mod.CDP:
-        nonlocal client, target_url
-        if client is None:
-            client, target = cdp_mod.connect(port, _url_hint(card))
-            target_url = str(target.get("url", ""))
-        return client
-
-    try:
-        if card.channel == "browser" and not positioned and (start_page > 1 or card.paging_url_template):
-            # Resuming is only real if the tab is actually moved back. Without
-            # this, `start_page=4` means "copy whatever is on screen and call it
-            # page 4" -- conserved, deduped, and from the wrong part of the list.
-            cl = ensure_client()
-            notes: list[str] = []
-            seen_url = restore_to(cl, card, start_page, notes)
-            target_url = seen_url
-            for line in notes:
-                print(line, file=sys.stderr)
-
+    from .channels.session import Session
+    from contextlib import nullcontext
+    from .index import DiskSet
+    with Session(card, port=port, allow_force=allow_force,
+                 page=start_page, positioned=positioned) as session, \
+            (nullcontext(set()) if retain_rounds else DiskSet()) as seen:
         for page in range(start_page, start_page + max_pages):
-            if card.channel == "browser":
-                cl = ensure_client()
-                rnd = harvest_browser(card, page=page, client=cl,
-                                      target_url=target_url)
-                # The tab moved, so the URL recorded on page 1 is a lie for
-                # pages 2..N. Re-read it after the harvest, before advancing.
-                target_url = str(cl.eval("location.href") or target_url)
-                rnd.captured.source_url = target_url
-                rnd.why = f"CDP 真按键 → {target_url[:80]}"
-            elif card.channel == "http":
-                try:
-                    rnd = harvest_http(card, page=page)
-                except _EndOfList as e:
-                    out.stopped_because = f"列表到底了：{e}"
-                    out.stopped_code = "source_exhausted"
-                    break
-            else:
-                rnd = harvest_desktop(card, page=page, allow_force=allow_force)
+            try:
+                rnd = session.read(page)
+            except _EndOfList as e:
+                out.stopped_because = f"列表到底了：{e}"
+                out.stopped_code = "source_exhausted"
+                break
 
             # A pager that "succeeds" without moving hands back the same page.
             # Its rows are all duplicates, so every row-count signal says
@@ -868,7 +782,9 @@ def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
             res, _ = parse_capture(rnd.captured, card)
             rnd.result = res
 
-            out.rounds.append(rnd)
+            out.collected += 1
+            if retain_rounds or not out.rounds:
+                out.rounds.append(rnd)
             out.pages_done = page
             if on_page is not None:
                 on_page(rnd)
@@ -877,7 +793,7 @@ def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
             out.new_per_page.append(added)
             empty_streak = empty_streak + 1 if added == 0 else 0
 
-            if len(out.rounds) >= max_pages:
+            if out.collected >= max_pages:
                 out.stopped_because = f"达到 --max-pages {max_pages}"
                 out.stopped_code = "scope_limit_reached"
                 break
@@ -886,11 +802,9 @@ def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
             # re-sorted items can hand back a page with 0 new rows while more
             # records genuinely remain, so "no new rows" must never outrank
             # "the next-page control is gone" or a content repeat.
-            if card.channel == "browser" and card.paging_url_template:
-                target_url = restore_to(ensure_client(), card, page + 1)
-                advanced = True
-            else:
-                advanced = _advance(card, client, allow_force)
+            if not retain_rounds and out.rounds and out.rounds[0] is rnd:
+                out.rounds.clear()
+            advanced = session.advance(page)
             if not advanced:
                 out.stopped_because = _no_advance_reason(card)
                 out.stopped_code = "source_exhausted"
@@ -904,9 +818,6 @@ def harvest_pages(card: Card, max_pages: int = 1, port: int | None = None,
                     f"把它改成 \"fingerprint\" 就只按明确信号停）")
                 break
             time.sleep(max(int(card.pause_ms), 0) / 1000.0)
-    finally:
-        if client is not None:
-            client.close()
 
     return out
 
@@ -923,35 +834,6 @@ def _fingerprint(cap: Captured) -> str:
         body = repr(cap.json_payload)
     norm = "\n".join(" ".join(ln.split()) for ln in str(body).splitlines() if ln.strip())
     return hashlib.sha1(norm.encode("utf-8", "replace")).hexdigest()
-
-
-def _advance(card: Card, client: cdp_mod.CDP | None,
-             allow_force: bool) -> bool:
-    """Move to the next page. False means the list is over."""
-    if card.channel == "http":
-        # Nothing to press: the next page is just another GET. Whether it has
-        # content is decided by the row count after it is parsed, not here.
-        return "{page}" in str((card.fetch or {}).get("url") or "")
-
-    if card.channel == "browser":
-        if client is None:
-            return False
-        if card.paging_style == "click" and card.paging_next:
-            return click_next_page(client, card.paging_next)
-        if card.paging_style == "key":
-            client.key_simple(cdp_mod.VK_PAGEDOWN)
-            return True
-        return False
-
-    # desktop: page key inside the same window
-    if card.paging_style in ("key", "none"):
-        hwnd = _desktop_target_hwnd(card, allow_force)
-        if kb.activate(hwnd) == "none":
-            return False
-        kb.require_foreground(hwnd)
-        send_named_key(str((card.target or {}).get("next_key", "pagedown")))
-        return True
-    return False
 
 
 def _no_advance_reason(card: Card) -> str:
@@ -1000,11 +882,6 @@ def _count_new(rnd: Round, seen: set[str], keys: list[str] | None = None) -> int
 def harvest(card: Card, page: int = 1, port: int | None = None,
             allow_force: bool = False) -> Round:
     """One page only. Kept as the seam `run`/`grab` use."""
-    if card.channel == "browser":
-        return harvest_browser(card, page=page, port=port)
-    if card.channel == "desktop":
-        return harvest_desktop(card, page=page, allow_force=allow_force)
-    if card.channel == "http":
-        return harvest_http(card, page=page)
-    raise InputError(f"卡 {card.name!r} 没写 channel，harvest 需要它",
-                     hint='在卡里加 channel = "browser" 或 channel = "desktop"')
+    from .channels.session import Session
+    with Session(card, port=port, allow_force=allow_force, page=page) as session:
+        return session.read(page)

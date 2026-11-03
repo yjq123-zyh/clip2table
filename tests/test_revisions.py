@@ -59,7 +59,7 @@ class TestLayoutIsDetected(Temp):
         self.assertEqual(R.layout_of(ds), 1)
 
     def test_a_new_directory_is_recognised_as_v2(self):
-        self.assertEqual(R.layout_of(self.ds()), 2)
+        self.assertEqual(R.layout_of(self.ds()), 3)
 
     def test_init_is_idempotent_and_keeps_the_id(self):
         ds = self.ds()

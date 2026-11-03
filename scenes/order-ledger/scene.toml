@@ -1,0 +1,32 @@
+schema = 1
+id = "order-ledger"
+version = "1.0.0"
+maintainer = "yjq123-zyh"
+min_clip2table = "0.4.0"
+card_schema = [1, 2]
+capabilities = ["cell", "json", "dom"]
+cards = ["order-ledger.toml", "cards/orders-json.toml", "cards/orders-dom.toml"]
+[[samples]]
+name = "text-current"
+card = "order-ledger.toml"
+kind = "text"
+inputs = ["input/page-1.txt", "input/page-2.txt", "input/page-3.txt"]
+view = "current"
+pending_format = "boolean"
+expected = "output/expected-current.csv"
+[[samples]]
+name = "json-current"
+card = "cards/orders-json.toml"
+kind = "json"
+inputs = ["input/page-1.json", "input/page-2.json", "input/page-3.json"]
+view = "current"
+pending_format = "boolean"
+expected = "output/expected-current.csv"
+[[samples]]
+name = "html-current"
+card = "cards/orders-dom.toml"
+kind = "html"
+inputs = ["input/page-1.html", "input/page-2.html", "input/page-3.html"]
+view = "current"
+pending_format = "boolean"
+expected = "output/expected-current.csv"

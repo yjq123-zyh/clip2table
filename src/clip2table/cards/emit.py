@@ -76,6 +76,8 @@ def field_block(spec, *, head: bool = True) -> list[str]:
     elif spec.kind == "const":
         _scalar(out, "value", "" if spec.value is None else str(spec.value))
 
+    if spec.kind == "dom" and spec.match != "unique":
+        _scalar(out, "match", spec.match)
     if spec.type != "text":
         out.append(f'type = "{spec.type}"')
     if spec.scope != "record":
@@ -96,12 +98,9 @@ def field_block(spec, *, head: bool = True) -> list[str]:
         _scalar(out, "min_len", spec.min_len)
     if spec.exclude:
         out.append("exclude = [" + ", ".join(toml_str(x) for x in spec.exclude) + "]")
-    # The dom/json primitives take selectors and paths. They are unimplemented
-    # today, but a card can carry them, and dropping them on an unrelated edit
-    # would quietly change which node the field was meant to read.
     for key in ("sel", "path"):
         value = getattr(spec, key, None)
-        if value:
+        if value is not None:
             _scalar(out, key, value)
     if getattr(spec, "attr", "text") != "text":
         _scalar(out, "attr", spec.attr)
@@ -111,7 +110,12 @@ def field_block(spec, *, head: bool = True) -> list[str]:
 def segment_block(card) -> list[str]:
     """Serialize the segmentation used by preview and saved-task execution."""
     out = ['[segment]', f'mode = "{card.segment_mode}"']
-    if card.segment_mode == "periodic":
+    if card.segment_mode == "json":
+        _scalar(out, "path", card.segment_path)
+    elif card.segment_mode == "dom":
+        _scalar(out, "region", card.segment_region)
+        _scalar(out, "records", card.segment_records)
+    elif card.segment_mode == "periodic":
         _scalar(out, "period", card.segment_period)
         _scalar(out, "offset", card.segment_offset)
         if card.segment_count is not None:

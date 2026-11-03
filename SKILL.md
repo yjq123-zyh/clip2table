@@ -18,8 +18,8 @@ description: 把屏幕上看得见、选得中的内容变成一张结构化表�
 | `browser` | E1（CDP 发真 Ctrl+A/Ctrl+C） | 要登录、要 JS 渲染、有反爬；窗口被盖住时不动前台，最小化时才短暂借前台并归还 |
 | `desktop` | E2（Win32 SendInput） | 目标根本不是浏览器：桌面客户端、Excel、记事本、只读报表 |
 
-字段抽取永远用「复制出来的文本」，不用 DOM 选择器取字段。选择器只用来回答一个问题：
-**选哪一块区域**。这是它和普通爬虫的根本区别——爬虫假装自己是浏览器，它直接用浏览器。
+字段提取支持文本行、HTML 表格、JSON 对象数组和 DOM 重复容器。
+结构卡使用 schema 2，记录路径、区域、字段规则及来源坐标；在线读取与离线重算共用解析流程。
 
 ---
 
@@ -160,9 +160,10 @@ index = 0
 第几条记录的哪个字段对不上。`clip2table cards validate <卡名>` 只检查卡本身合不合法，
 它管不了"规则合法但是错的"——两个命令的分工是真实的，都要跑。
 
-字段取数原语只有五条能用：`line` / `cell` / `search` / `span` / `const`。
-`dom` 与 `json` 在词表里但**没有实现**——写了会被 `cards validate` 拒绝，
-别绕过去，改用能用的那五条。表达不了就进未识别，宁可少给一列，也不猜一个值。
+文本与表格原语为 `line` / `cell` / `search` / `span` / `const`。
+`dom` 和 `json` 字段使用 schema 2。JSON 的 `[segment].path` 定位记录数组，
+字段 path 相对单条记录；DOM 的 region/records 定位区域及记录，字段 sel/attr 读取文本或属性。
+本地 JSON 使用 `--json-file`；完整样本与命令见 docs/usage.md 第 15 节。
 
 ---
 
@@ -279,6 +280,10 @@ required     = ["title"]     # 必须有值的字段
 
 HTTP 页码和浏览器 URL 模板可以恢复；桌面与纯点击翻页需用户确认下一来源位置。
 旧 pages/state 数据集继续走原读取与续采路径；采用到新布局时用独立目标目录和明确的捕获类型。
+
+JSON/DOM 使用 schema 2。先预览路径、区域与字段来源，使用候选编号保存选择；执行动作回答使用 action_id、candidate_id 和最新 checkpoint。
+新数据集逐页提交到布局 3，查询使用 `api.query_view` 分页，批量导出使用 `detail="summary"`。
+安装场景通过 `clip2table test scene:order-ledger` 与 `clip2table test scene:notice-list` 运行。
 
 ---
 

@@ -146,6 +146,12 @@ def _parse_when(value: str, tz: str) -> datetime | None:
     v = (value or "").strip()
     if not v:
         return None
+    try:
+        d = datetime.fromisoformat(v)
+        return d if d.tzinfo else d.replace(tzinfo=_tz(tz))
+    except ValueError:
+        pass
+
     fmts = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
             "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d",
             "%Y年%m月%d日 %H:%M", "%Y年%m月%d日", "%Y%m%d")
@@ -154,13 +160,13 @@ def _parse_when(value: str, tz: str) -> datetime | None:
             return datetime.strptime(v, f).replace(tzinfo=_tz(tz))
         except ValueError:
             continue
-    try:
-        d = datetime.fromisoformat(v)
-        return d if d.tzinfo else d.replace(tzinfo=_tz(tz))
-    except ValueError:
-        return None
+    return None
 
 
+from functools import lru_cache
+
+
+@lru_cache(maxsize=16)
 def _tz(name: str):
     try:
         from zoneinfo import ZoneInfo
@@ -260,13 +266,15 @@ def collect_versions(root: str | Path, revision_id: str,
     root = Path(root)
     rev = revisions.read_revision(root, revision_id)
     out = VersionSet(policy=policy)
-    parses = {p.parse_id: p for p in revisions.list_parses(root)}
+    indexed = revisions.layout_of(root) == 3
+    from . import index
+    parses = {} if indexed else {p.parse_id: p for p in revisions.list_parses(root)}
     for entry in rev.entries:
         cid, pid = entry.get("capture_id", ""), entry.get("parse_id", "")
         if not pid:
             out.skipped.append({"capture_id": cid, "why": "这个捕获没有解析结果"})
             continue
-        pref = parses.get(pid)
+        pref = revisions.ParseRef.from_dict(index.metadata(root, "parse", pid)) if indexed else parses.get(pid)
         if pref is None:
             out.skipped.append({"capture_id": cid, "why": f"缺解析结果 {pid}"})
             continue
@@ -278,7 +286,7 @@ def collect_versions(root: str | Path, revision_id: str,
         except InputError as e:
             out.skipped.append({"capture_id": cid, "why": e.message})
             continue
-        _, res = revisions.read_parse(root, pid)
+        _, res = index.parse_result(root, pid) if indexed else revisions.read_parse(root, pid)
         out.scope.append({"capture_id": cid, "page": cref.page,
                           "kind": cref.kind, "observed_at": cref.observed_at,
                           "rows": len(res.rows), "rule_id": pref.rule_id})
@@ -377,6 +385,7 @@ class Ledger:
     skipped: list[dict[str, str]] = field(default_factory=list)
     scope: list[dict[str, Any]] = field(default_factory=list)
     decision_set_id: str = ""
+    candidate_keys: dict[str, str] = field(default_factory=dict)
 
     # -- serialisation used by both the CLI and the API -------------------
     def as_dict(self) -> dict[str, Any]:
@@ -470,7 +479,7 @@ class Ledger:
 
 def build(root: str | Path, revision_id: str, policy: LedgerPolicy, *,
           baseline: str = "", decision_set_id: str = "",
-          baseline_decision_set_id: str = "") -> Ledger:
+          baseline_decision_set_id: str = "", _versions=None) -> Ledger:
     """Assemble the three views for one revision against one baseline.
 
     `baseline` is explicit on purpose. "Changed since last time" needs a "last
@@ -478,7 +487,7 @@ def build(root: str | Path, revision_id: str, policy: LedgerPolicy, *,
     against different tables while both saying "since last time".
     """
     root = Path(root)
-    vs = collect_versions(root, revision_id, policy)
+    vs = _versions if _versions is not None else collect_versions(root, revision_id, policy)
     led = Ledger(policy=policy, revision_id=revision_id, baseline_id=baseline,
                  skipped=vs.skipped, scope=vs.scope, decision_set_id=decision_set_id)
     decisions = revisions._load(root / "decisions" / f"{decision_set_id}.json", {}) if decision_set_id else {}
@@ -493,6 +502,7 @@ def build(root: str | Path, revision_id: str, policy: LedgerPolicy, *,
                                                    ensure_ascii=False, sort_keys=True) for v in ordered})],
                                ensure_ascii=False, sort_keys=True)
         pending_id = "pend-" + hashlib.sha256(signature.encode()).hexdigest()[:20]
+        led.candidate_keys[pending_id] = key
         decision = decisions.get(pending_id, {})
         selected = next((v for v in ordered if decision.get("candidate") == candidate_id(v)), None)
         if selected:
@@ -593,7 +603,7 @@ def _choose(ordered: list[EntityVersion],
 
 
 def _changes_against(root: Path, baseline: str, led: Ledger,
-                     policy: LedgerPolicy, baseline_decision_set_id: str = "") -> list[ChangedEntity]:
+                     policy: LedgerPolicy, baseline_decision_set_id: str = "", _before=None) -> list[ChangedEntity]:
     """Compare two revisions as business change, keeping rule effects separate.
 
     The rule check comes first: if the two sides were parsed by different rules,
@@ -601,14 +611,8 @@ def _changes_against(root: Path, baseline: str, led: Ledger,
     Marking it `rule_reparse` is not a refusal to compare -- the before and after
     are still shown -- it is a refusal to *call* it a business change.
     """
-    bvs = collect_versions(root, baseline, policy)
-    bgroups = bvs.by_key()
-    # The baseline has to answer the same question the current side does: "which
-    # version of this entity was current *then*". Taking the first observation
-    # would compare today's value against whatever happened to be read first,
-    # and report an identity change that never happened -- with three pages of
-    # history on one order, the first two pages look like the customer changed.
-    baseline_view = build(root, baseline, policy, decision_set_id=baseline_decision_set_id)
+    bvs = collect_versions(root, baseline, policy) if _before is None else VersionSet(policy=policy)
+    baseline_view = build(root, baseline, policy, decision_set_id=baseline_decision_set_id) if _before is None else _before
     bpick = {c.chosen.key: c.chosen for c in baseline_view.current}
     out: list[ChangedEntity] = []
     # The current side is the *chosen* version per entity, not every observation:

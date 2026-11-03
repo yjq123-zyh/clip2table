@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clip2table"
-version = "0.3.0"
-description = "从网页和桌面应用采集可复制文本，按规则整理表格并持续更新业务台账"
+version = "0.4.0"
+description = "从网页、桌面应用和 JSON 提取数据，按规则整理表格并持续更新业务台账"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -51,3 +51,12 @@ clip2table = [
   "cards/builtin/samples/*/*.txt",
   "cards/builtin/samples/*/*.expect.tsv",
 ]
+
+[tool.setuptools.data-files]
+"share/clip2table/scenes/order-ledger" = ["scenes/order-ledger/*.toml", "scenes/order-ledger/*.md", "scenes/order-ledger/*.py"]
+"share/clip2table/scenes/order-ledger/cards" = ["scenes/order-ledger/cards/*.toml"]
+"share/clip2table/scenes/order-ledger/input" = ["scenes/order-ledger/input/*"]
+"share/clip2table/scenes/order-ledger/output" = ["scenes/order-ledger/output/*"]
+"share/clip2table/scenes/notice-list" = ["scenes/notice-list/*.toml", "scenes/notice-list/*.md"]
+"share/clip2table/scenes/notice-list/input" = ["scenes/notice-list/input/*"]
+"share/clip2table/scenes/notice-list/output" = ["scenes/notice-list/output/*"]

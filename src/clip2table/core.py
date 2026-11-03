@@ -18,8 +18,27 @@ from .pipeline.sniff import sniff
 def parse_capture(cap: Captured, card: Card | None = None) -> tuple[ParseResult, InferResult | None]:
     """Returns (result, infer_result_or_None)."""
     if card is None:
+        if cap.kind == "json":
+            from .errors import InputError
+            raise InputError("JSON 内容需要一张 schema=2 的卡片声明记录路径与字段")
         inf = infer(cap)
         return inf.result, inf
+
+    if card.segment_mode in ("json", "dom"):
+        from .pipeline.structured import parse_structured, source_hash, structure_candidates
+        from .errors import ChannelError
+        try:
+            res = parse_structured(cap, card)
+        except ChannelError as error:
+            if error.reason == "structure_selection":
+                error.details.update(candidates=structure_candidates(cap, card), source_hash=source_hash(cap))
+            raise
+        for name in card.required:
+            missing = [i for i, row in enumerate(res.rows, 1) if not _filled(row.get(name))]
+            if missing:
+                res.deviations.append(f"必填字段 {name} 在第 {_few(missing)} 条为空")
+                res.deviation_rows.extend(missing)
+        return res, None
 
     lines = to_lines(normalize_text(_text_of(cap)))
     seg = segment(

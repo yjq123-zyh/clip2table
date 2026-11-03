@@ -29,16 +29,21 @@ class CellChange:
     after: str
     line_before: int | None = None
     line_after: int | None = None
+    locator_before: dict = field(default_factory=dict)
+    locator_after: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {"key": self.key, "field": self.field_name,
                 "before": self.before, "after": self.after,
-                "line_before": self.line_before, "line_after": self.line_after}
+                "line_before": self.line_before, "line_after": self.line_after,
+                "locator_before": self.locator_before, "locator_after": self.locator_after}
 
     def line(self) -> str:
         where = ""
         if self.line_after is not None:
             where = f"  ← 第 {self.line_after} 行"
+        elif self.locator_after:
+            where = f"  ← {self.locator_after.get('path', '')}"
         return f"{self.key} ｜ {self.field_name} ｜ {_show(self.before)} → {_show(self.after)}{where}"
 
 
@@ -116,6 +121,9 @@ def _key_of(row: Row, keys: list[str] | None, index: int) -> tuple[str, bool]:
         if all(vals) and len(set(vals)) > 0:
             import json
             return vals[0] if len(vals) == 1 else json.dumps(vals, ensure_ascii=False), True
+    if row.locator:
+        import json
+        return "@structure:" + json.dumps(row.locator, sort_keys=True), True
     if row.raw_at:
         import json
         return "@span:" + json.dumps(row.raw_at), True
@@ -164,6 +172,8 @@ def diff_results(before: ParseResult, after: ParseResult, *,
         if k in vague_b or k in vague_a:
             continue
         rb, ra = idx_b[k], idx_a[k]
+        if rb.locator != ra.locator:
+            out.boundaries.append({"key": k, "before": rb.locator, "after": ra.locator})
         if rb.raw_at != ra.raw_at:
             out.boundaries.append({"key": k, "before": rb.raw_at, "after": ra.raw_at})
         for name in list(dict.fromkeys(after.fields + before.fields)):
@@ -177,7 +187,8 @@ def diff_results(before: ParseResult, after: ParseResult, *,
                 key=k, field_name=name,
                 before="" if val_b is None else str(val_b),
                 after="" if val_a is None else str(val_a),
-                line_before=_abs_line(rb, tb), line_after=_abs_line(ra, ta)))
+                line_before=_abs_line(rb, tb), line_after=_abs_line(ra, ta),
+                locator_before=tb.locator if tb else {}, locator_after=ta.locator if ta else {}))
     out.only_before = sorted(set(idx_b) - set(idx_a))
     out.only_after = sorted(set(idx_a) - set(idx_b))
     # An "ambiguous" label is only worth printing when it explains a row that

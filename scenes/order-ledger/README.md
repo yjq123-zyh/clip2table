@@ -1,8 +1,20 @@
 # 订单台账
 
+场景包版本及兼容信息见 `scene.toml`。文本、JSON 和 DOM 三种输入共用独立业务答案：
+
+文件命令在源码根目录执行；安装包用户进入 Python 环境的 `share/clip2table` 目录后执行相同命令。
+
+```powershell
+clip2table test scene:order-ledger
+clip2table task check scenes/order-ledger/cards/orders-json.toml --json-file scenes/order-ledger/input/page-1.json
+clip2table task check scenes/order-ledger/cards/orders-dom.toml --html-file scenes/order-ledger/input/page-1.html
+```
+
+安装后的环境也可通过 `test scene:order-ledger` 执行完整样本回归。
+
 把后台订单列表整理成一张能按订单号核对、能一直往下接的台账：订单号、客户、金额、状态、下单时间、更新时间六列。
 
-目录里有三页输入、一张任务卡、四份独立答案、一个答案生成脚本和一个本地网页服务。三页不是「三页数据」，是**同一批订单被观察了三次**——第二页是新订单，第三页混进了晚到的旧版本、同时间的冲突和一条全新订单。这正是台账要能处理的事情。
+目录包含三次订单观察、任务卡、独立答案、答案生成脚本和本地网页服务。第二次观察新增订单，第三次包含晚到的旧版本、同时间冲突和新增订单。
 
 | 文件 | 内容 |
 | --- | --- |

@@ -1206,6 +1206,8 @@ def _field_def(f) -> dict[str, Any]:
     """
     out: dict[str, Any] = {}
     for fld in dataclasses.fields(f):
+        if fld.name == "match" and f.kind != "dom":
+            continue
         val = getattr(f, fld.name)
         if isinstance(val, (list, tuple)):
             val = list(val)
@@ -1256,6 +1258,9 @@ def _card_fingerprint(card) -> dict[str, Any]:
         "channel": getattr(card, "channel", ""),
         "segment": {
             "mode": getattr(card, "segment_mode", ""),
+            **({"path": card.segment_path} if getattr(card, "segment_mode", "") == "json" else {}),
+            **({"region": card.segment_region, "records": card.segment_records}
+               if getattr(card, "segment_mode", "") == "dom" else {}),
             "anchor": getattr(card, "anchor", None),
             "anchor_next": getattr(card, "anchor_next", None),
             "min_lines": getattr(card, "min_lines", 1),

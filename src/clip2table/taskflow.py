@@ -75,6 +75,7 @@ class Answers:
     # `[task].created`: the day the task started. A re-conversion is not a new
     # task, so this is carried over rather than restamped.
     created: str = ""
+    schema: int = 1
 
 
 def _ask(prompt: str, default: str = "", *, assume: bool) -> str:
@@ -277,7 +278,7 @@ def build_answers(res: ParseResult, inf, cap, args, card=None,
         samples=(card.samples if card is not None else None),
         paging_note=note,
         ledger=(dict(card.ledger) if card is not None else {}),
-        created=str(old_task.get("created") or ""))
+        created=str(old_task.get("created") or ""), schema=card.schema if card else 1)
 
 
 def _configure_source(args, channel, fetch, target, paging, *, assume):
@@ -502,6 +503,12 @@ def _segment_parts(cap, level: str, inf, card=None) -> tuple[str, str, str]:
     all -- a card that its own parser rejects.
     """
     if card is not None:
+        if card.segment_mode in ("json", "dom"):
+            bits = [f'mode = "{card.segment_mode}"']
+            for key, value in (("path", card.segment_path),) if card.segment_mode == "json" else (
+                    ("region", card.segment_region), ("records", card.segment_records)):
+                bits.append(f"{key} = {emit.toml_str(value)}")
+            return ("\n".join(bits), "", "")
         if card.segment_mode == "periodic":
             bits = ['mode = "periodic"', f"period = {card.segment_period}",
                     f"offset = {card.segment_offset}"]
@@ -561,7 +568,7 @@ def render_task_card(a: Answers) -> str:
     from .cli import _toml_key, _toml_key_str
 
     lines = [
-        "schema = 1",
+        f"schema = {a.schema}",
         f"name   = {_toml_key_str(a.name)}",
         f'channel = "{a.channel}"',
     ]
@@ -767,9 +774,9 @@ def preview_text(res: ParseResult, lines: list[str], *, rows: int = 8,
     if res.rows:
         out.append("")
         f = field or res.fields[0]
-        out.append(f"「{f}」这一列的值分别来自原文的哪一行：")
+        out.append(f"「{f}」字段来源：")
         out.extend(field_sources(res, f, limit=rows))
-    if source_lines:
+    if source_lines and not res.coverage:
         out.append("")
         out.append("原文（左边是行号，中间是它属于哪条记录，`·` 表示没人认领）：")
         out.extend(numbered_source(lines, res, limit=source_lines))

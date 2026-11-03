@@ -124,43 +124,33 @@ def _fit(value: Any, row_no: int, field: str,
     return stripped
 
 
-def _sheet_xml(rows: list[Row], fields: list[str], sheet: str,
-               changes: list[Change] | None = None) -> str:
-    width = max(1, len(fields))
-    last_col = _col_letter(width - 1)
-    out = [
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
-        # Freeze the header so a 10k-row sheet stays readable.
-        '<sheetViews><sheetView workbookViewId="0">'
-        '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
-        '</sheetView></sheetViews>',
-    ]
+def _sheet_parts(rows, fields, changes):
+    from itertools import chain, islice
+    rows = iter(rows)
+    sample = list(islice(rows, 200))
+    yield '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    yield '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+    yield '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
     if fields:
-        widths = []
-        for i, f in enumerate(fields):
-            longest = max([len(str(f))] + [len(str(r.values.get(f) or "")[:60])
-                                           for r in rows[:200]])
-            widths.append(f'<col min="{i + 1}" max="{i + 1}" '
-                          f'width="{min(60, max(8, longest + 2))}" customWidth="1"/>')
-        out.append("<cols>" + "".join(widths) + "</cols>")
+        yield '<cols>'
+        for i, name in enumerate(fields):
+            longest = max([len(str(name))] + [len(str(row.get(name) or "")[:60]) for row in sample])
+            yield f'<col min="{i+1}" max="{i+1}" width="{min(60,max(8,longest+2))}" customWidth="1"/>'
+        yield '</cols>'
+    yield '<sheetData><row r="1">' + ''.join(_cell(f"{_col_letter(i)}1", name, 1) for i,name in enumerate(fields)) + '</row>'
+    last = 1
+    for last, row in enumerate(chain(sample, rows), 2):
+        yield f'<row r="{last}">' + ''.join(_cell(f"{_col_letter(i)}{last}",
+            _fit(row.get(name), last, name, changes) if changes is not None else row.get(name), 0)
+            for i,name in enumerate(fields)) + '</row>'
+    yield '</sheetData>'
+    if fields and last > 1:
+        yield f'<autoFilter ref="A1:{_col_letter(len(fields)-1)}{last}"/>'
+    yield '</worksheet>'
 
-    out.append("<sheetData>")
-    out.append('<row r="1">' + "".join(
-        _cell(f"{_col_letter(i)}1", f, 1) for i, f in enumerate(fields)) + "</row>")
-    for ri, row in enumerate(rows, start=2):
-        cells = []
-        for i, f in enumerate(fields):
-            value = row.values.get(f)
-            if changes is not None:
-                value = _fit(value, ri, f, changes)
-            cells.append(_cell(f"{_col_letter(i)}{ri}", value, 0))
-        out.append(f'<row r="{ri}">' + "".join(cells) + "</row>")
-    out.append("</sheetData>")
-    if fields and rows:
-        out.append(f'<autoFilter ref="A1:{last_col}{len(rows) + 1}"/>')
-    out.append("</worksheet>")
-    return "".join(out)
+
+def _sheet_xml(rows, fields, sheet, changes=None):
+    return ''.join(_sheet_parts(rows, fields, changes))
 
 
 def _companion(path: Path, changes: list[Change]) -> Path | None:
@@ -184,9 +174,10 @@ def _companion(path: Path, changes: list[Change]) -> Path | None:
 
 
 def write_xlsx(rows: list[Row], fields: list[str], path: str | Path,
-               sheet: str = "Sheet1") -> RenderResult:
+               sheet: str = "Sheet1", detail: str = "full") -> RenderResult:
     p = Path(path)
-    changes: list[Change] = []
+    from .base import ChangeLog
+    changes = ChangeLog(p) if detail == "summary" else []
     p.parent.mkdir(parents=True, exist_ok=True)
     safe_sheet = re.sub(r"[\\/*?:\[\]]", "_", sheet)[:31] or "Sheet1"
 
@@ -197,17 +188,18 @@ def write_xlsx(rows: list[Row], fields: list[str], path: str | Path,
         z.writestr("xl/workbook.xml", _WORKBOOK.format(sheet=_esc(safe_sheet)))
         z.writestr("xl/_rels/workbook.xml.rels", _WB_RELS)
         z.writestr("xl/styles.xml", _STYLES)
-        z.writestr("xl/worksheets/sheet1.xml",
-                   _sheet_xml(rows, fields, safe_sheet, changes))
+        with z.open("xl/worksheets/sheet1.xml", "w") as stream:
+            for part in _sheet_parts(rows, fields, changes):
+                stream.write(part.encode("utf-8"))
     return RenderResult(path=p, changes=changes,
-                        companion=_companion(p, changes))
+                        companion=(changes.companion if changes else None) if detail == "summary" else _companion(p, changes))
 
 
 def write_any(fmt: str, rows: list[Row], fields: list[str],
-              path: str | Path) -> RenderResult:
+              path: str | Path, detail: str = "full") -> RenderResult:
     from .text import WRITERS
     if fmt == "xlsx":
-        return write_xlsx(rows, fields, path)
+        return write_xlsx(rows, fields, path, detail=detail)
     if fmt in WRITERS:
         return WRITERS[fmt](rows, fields, path)
     raise ValueError(f"不支持的导出格式 {fmt!r}（支持 csv/md/xlsx/jsonl）")

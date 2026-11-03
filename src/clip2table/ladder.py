@@ -19,11 +19,9 @@ other way in, and the wrong answer for a plain HTML page.
 from __future__ import annotations
 
 import re
-import time
 
 from .cards.schema import Card
 from .channels import cdp as cdp_mod
-from .channels import http as http_mod
 from .errors import ChannelError, InputError
 from .models import Captured
 
@@ -33,11 +31,6 @@ A_TIMEOUT = 2.0
 # A pinned channel is an explicit instruction, so it gets a real timeout rather
 # than the ladder's "is it worth trying" timeout.
 PINNED_TIMEOUT = 15.0
-# After Page.navigate, the document needs a moment before it will accept
-# keystrokes. Not a poll: a poll for "ready" would need to know what ready means
-# for an unknown site, and guessing wrong turns a slow page into a failed page.
-NAV_SETTLE = 0.8
-
 _HOST_RE = re.compile(r"^https?://([^/?#]+)", re.IGNORECASE)
 
 
@@ -80,13 +73,15 @@ def _scratch_card(url: str) -> Card:
 def try_http(url: str, timeout: float = A_TIMEOUT
              ) -> tuple[Captured | None, str]:
     """Rung A. Returns (capture, reason_it_failed); exactly one is meaningful."""
-    result = http_mod.fetch(url, timeout=timeout)
-    if not result.ok:
-        return None, result.reason or f"HTTP {result.status}"
-    kind = "html" if "<" in result.body[:400] else "text"
-    return (Captured(kind=kind, payload=result.body, source_url=result.url,
-                     requested_url=url, observed_url=result.url,
-                     channel="http", engine="HTTP", formats=["http"]), "")
+    from .channels.session import Session
+    card = _scratch_card(url)
+    card.channel = "http"
+    card.fetch = {"url": url}
+    try:
+        with Session(card, timeout=timeout) as session:
+            return session.read().captured, ""
+    except ChannelError as e:
+        return None, str(e)
 
 
 # --------------------------------------------------------------------- rung B
@@ -103,23 +98,12 @@ def try_browser(url: str, port: int | None = None
     found = port or cdp_mod.find_debug_port()
     if found is None:
         return None, "没有浏览器开着调试端口"
-    client = None
+    from .channels.session import Session
     try:
-        client, _target = cdp_mod.connect(found, url_contains=_host(url))
-        client.call("Page.navigate", {"url": url})
-        time.sleep(NAV_SETTLE)
-        href = str(client.eval("location.href") or "")
-        if href.startswith("chrome-error://"):
-            return None, f"浏览器也打不开这个地址（{href}）"
-        from .harvest import harvest_browser
-        rnd = harvest_browser(_scratch_card(url), page=1, client=client,
-                              target_url=url)
-        return rnd.captured, ""
+        with Session(_scratch_card(url), port=found, url=url) as session:
+            return session.read().captured, ""
     except (ChannelError, cdp_mod.CDPError) as e:
         return None, str(e)
-    finally:
-        if client is not None:
-            client.close()
 
 
 # --------------------------------------------------------------------- rung C
@@ -153,12 +137,12 @@ def try_desktop(url: str) -> tuple[Captured | None, str]:
     if exe not in _BROWSER_EXES:
         return None, (f"当前前台窗口是 {exe or '未知程序'}（{title[:40]!r}），"
                       f"不是浏览器；桌面通道不会对非浏览器窗口按 Ctrl+A")
-    from .harvest import harvest_desktop
+    from .harvest import harvest
     card = _scratch_card(url)
     card.channel = "desktop"
     card.target = {"title": title, "restore": True, "url": url}
     try:
-        rnd = harvest_desktop(card, page=1)
+        rnd = harvest(card, page=1)
     except ChannelError as e:
         return None, str(e)
     # Deliberately NOT `rnd.captured.source_url = url`. This rung drove whatever

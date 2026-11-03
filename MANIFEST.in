@@ -26,3 +26,6 @@ exclude docs/history/clip2table-design-review-v1.md
 
 # 不装包也能跑的子命令启动器，CI 和文档都用它
 include _dev/c2t.py
+include _dev/benchmark_storage.py
+include _dev/check_sessions.py
+include _dev/check_release_workflow.py

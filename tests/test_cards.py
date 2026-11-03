@@ -62,7 +62,7 @@ class TestEveryRejectionNamesTheKey(unittest.TestCase):
         self.assertRejects(d, "schema")
 
     def test_wrong_schema_version(self):
-        self.assertRejects(card_dict(schema=2), "schema")
+        self.assertRejects(card_dict(schema=3), "schema")
 
     def test_bad_name_shape(self):
         self.assertRejects(card_dict(name="Demo Card"), "name")

@@ -96,6 +96,8 @@ class FieldTrace:
     detail: str = ""
     rule: str = ""               # the rule that produced it, verbatim
     normalized: str | None = None  # e.g. ISO date, when the value is a date
+    locator: dict[str, Any] = field(default_factory=dict)
+    matches: int = 0
 
     @property
     def empty(self) -> bool:
@@ -104,17 +106,21 @@ class FieldTrace:
     def as_dict(self) -> dict[str, Any]:
         return {"kind": self.kind, "status": self.status, "raw": self.raw,
                 "line": self.line, "detail": self.detail, "rule": self.rule,
-                "normalized": self.normalized}
+                "normalized": self.normalized, "locator": self.locator, "matches": self.matches}
 
     @classmethod
     def from_dict(cls, name: str, d: dict[str, Any]) -> "FieldTrace":
         return cls(name, str(d.get("kind") or ""), str(d.get("status") or "ok"),
                    d.get("raw"), d.get("line"), str(d.get("detail") or ""),
-                   str(d.get("rule") or ""), d.get("normalized"))
+                   str(d.get("rule") or ""), locator=dict(d.get("locator") or {}),
+                   matches=int(d.get("matches", 0)), normalized=d.get("normalized"))
 
     def describe(self) -> str:
-        where = f"第 {self.line} 行" if self.line is not None else "记录里"
+        where = self.locator.get("path") or (f"第 {self.line} 行" if self.line is not None else "记录里")
         why = {
+            "null": f"{where} 的原值为 null",
+            "ambiguous": f"{where} 匹配到 {self.matches} 个候选",
+            "type-mismatch": f"{where} 需要标量字段",
             "missing": f"{where}没有这条规则要的东西",
             "out-of-range": f"{where}不存在（规则指到记录外面去了）",
             "no-match": f"{where}有文本，但正则没匹配上",
@@ -147,6 +153,8 @@ class Row:
     # caller kept the audit trail.
     traces: dict[str, FieldTrace] = field(default_factory=dict, compare=False)
 
+    locator: dict[str, Any] = field(default_factory=dict)
+
     def get(self, key: str) -> Any:
         return self.values.get(key)
 
@@ -173,6 +181,8 @@ class ParseResult:
     # layout pass as clean data.
     deviations: list[str] = field(default_factory=list)
     deviation_rows: list[int] = field(default_factory=list)
+
+    coverage: dict[str, Any] = field(default_factory=dict)
 
     @property
     def fill_rates(self) -> dict[str, float]:
